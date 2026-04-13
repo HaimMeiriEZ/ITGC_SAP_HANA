@@ -1,0 +1,70 @@
+{
+    "critical_users": [
+        "SYSTEM",
+        "SAPHANADB",
+        "SYS",
+        "_SYS_REPO",
+        "XSSQLCC_AUTO_USER"
+    ],
+    "critical_privileges": [
+        "AUDIT ADMIN",
+        "AUDIT OPERATOR",
+        "DATA ADMIN",
+        "INIFILE ADMIN",
+        "LOG ADMIN",
+        "ROLE ADMIN",
+        "SERVICE ADMIN",
+        "TRUST ADMIN",
+        "USER ADMIN",
+        "BACKUP ADMIN"
+    ],
+    "password_policy_defaults": {
+        "minimal_password_length": 8,
+        "force_first_password_change": "TRUE",
+        "password_lock_time": 1440,
+        "password_layout": "A1a",
+        "last_used_passwords": 5,
+        "maximum_invalid_connect_attempts": 6,
+        "minimal_password_lifetime": 1,
+        "maximum_password_lifetime": 182,
+        "maximum_unused_initial_password_lifetime": 7,
+        "maximum_unused_productive_password_lifetime": 365,
+        "password_expire_warning_time": 14,
+        "password_lock_for_system_user": "TRUE",
+        "detailed_error_on_connect": "FALSE"
+    },
+    "file_mappings": {
+        "USERS": "users_export.csv",
+        "M_PASSWORD_POLICY": "password_policy.csv",
+        "GRANTED_PRIVILEGES": "privileges.csv",
+        "AUDIT_POLICIES": "audit_policies.csv"
+    },
+    "inactive_days_threshold": 120,
+    "user_review_period": {
+        "start_date": "2025-01-01",
+        "end_date": "2025-12-31"
+    },
+    "user_type_rules": {
+        "Dialog": [
+            "DIALOG",
+            "DIA",
+            "ENDUSER"
+        ],
+        "Generic": [
+            "GENERIC",
+            "SHARED",
+            "COMMON",
+            "FIRE",
+            "EMERGENCY"
+        ],
+        "Technical": [
+            "_SYS",
+            "SYSTEM",
+            "TECH",
+            "SERVICE",
+            "BATCH",
+            "ADMIN"
+        ],
+        "Application": []
+    }
+}
