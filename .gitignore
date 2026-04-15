@@ -1,0 +1,22 @@
+# Python virtual environment
+.venv/
+
+# Python cache and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Runtime logs and local generated files
+logs/*.log
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+# OS noise
+Desktop.ini
+desktop.ini
