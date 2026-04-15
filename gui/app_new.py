@@ -29,6 +29,10 @@ except ImportError as e:
 class AuditGUI:
     DEFAULT_SETTINGS = {
         "critical_users": ["SYSTEM", "SAPHANADB", "SYS", "_SYS_REPO", "XSSQLCC_AUTO_USER"],
+        "critical_roles": [
+            "SAP_INTERNAL_HANA_SUPPORT",
+            "PUBLIC"
+        ],
         "critical_privileges": [
             "AUDIT ADMIN",
             "AUDIT OPERATOR",
@@ -60,8 +64,107 @@ class AuditGUI:
             "USERS": "users_export.csv",
             "M_PASSWORD_POLICY": "password_policy.csv",
             "GRANTED_PRIVILEGES": "privileges.csv",
+            "GRANTED_ROLES": "granted_roles.csv",
             "AUDIT_POLICIES": "audit_policies.csv",
+            "AUDIT_TRAIL": "audit_trail.csv",
+            "M_INIFILE_CONTENTS": "m_inifile_contents.csv",
         },
+        "audit_event_keywords": [
+            "CREATE USER",
+            "ALTER USER",
+            "DROP USER",
+            "CREATE ROLE",
+            "DROP ROLE",
+            "GRANT ROLE",
+            "GRANT PRIVILEGE",
+            "REVOKE",
+            "ALTER SYSTEM",
+            "AUDIT POLICY",
+            "LOGIN"
+        ],
+        "ini_security_defaults": [
+            {
+                "file_name": "global.ini",
+                "section": "auditing configuration",
+                "key": "global_auditing_state",
+                "expected_value": "true",
+                "comparison_rule": "Exact",
+                "risk_level": "High",
+                "title": "Audit trail גלובלי חייב להיות פעיל"
+            },
+            {
+                "file_name": "global.ini",
+                "section": "persistence",
+                "key": "log_mode",
+                "expected_value": "normal",
+                "comparison_rule": "Exact",
+                "risk_level": "High",
+                "title": "Log mode חייב להיות NORMAL"
+            },
+            {
+                "file_name": "indexserver.ini",
+                "section": "password policy",
+                "key": "detailed_error_on_connect",
+                "expected_value": "false",
+                "comparison_rule": "Exact",
+                "risk_level": "Medium",
+                "title": "אין לחשוף הודעות שגיאה מפורטות בהתחברות"
+            },
+            {
+                "file_name": "indexserver.ini",
+                "section": "password policy",
+                "key": "password_lock_for_system_user",
+                "expected_value": "true",
+                "comparison_rule": "Exact",
+                "risk_level": "High",
+                "title": "נעילת משתמשי SYSTEM חייבת להיות פעילה"
+            },
+            {
+                "file_name": "indexserver.ini",
+                "section": "password policy",
+                "key": "force_first_password_change",
+                "expected_value": "true",
+                "comparison_rule": "Exact",
+                "risk_level": "Medium",
+                "title": "חובת החלפת סיסמה ראשונית חייבת להיות פעילה"
+            },
+            {
+                "file_name": "indexserver.ini",
+                "section": "password policy",
+                "key": "minimal_password_length",
+                "expected_value": 8,
+                "comparison_rule": "Minimum",
+                "risk_level": "High",
+                "title": "אורך סיסמה מינימלי חייב להיות לפחות 8"
+            },
+            {
+                "file_name": "indexserver.ini",
+                "section": "password policy",
+                "key": "maximum_invalid_connect_attempts",
+                "expected_value": 6,
+                "comparison_rule": "Maximum",
+                "risk_level": "Medium",
+                "title": "מספר ניסיונות התחברות שגויים חייב להיות מוגבל"
+            },
+            {
+                "file_name": "indexserver.ini",
+                "section": "password policy",
+                "key": "last_used_passwords",
+                "expected_value": 5,
+                "comparison_rule": "Minimum",
+                "risk_level": "Medium",
+                "title": "היסטוריית סיסמאות חייבת לכלול לפחות 5 ערכים"
+            },
+            {
+                "file_name": "indexserver.ini",
+                "section": "password policy",
+                "key": "password_expire_warning_time",
+                "expected_value": 14,
+                "comparison_rule": "Minimum",
+                "risk_level": "Low",
+                "title": "יש להתריע מראש לפני פקיעת סיסמה"
+            }
+        ],
         "inactive_days_threshold": 120,
         "user_review_period": {
             "start_date": "2026-01-01",
@@ -120,10 +223,34 @@ class AuditGUI:
                 "required": ["GRANTEE", "PRIVILEGE"],
                 "required_any": [],
             },
+            "GRANTED_ROLES": {
+                "label": "הקצאות תפקידים (טבלת GRANTED_ROLES)",
+                "required": [],
+                "required_any": [
+                    ("GRANTEE", "GRANTEE_NAME", "USER_NAME", "USER"),
+                    ("ROLE_NAME", "ROLE", "GRANTED_ROLE_NAME", "GRANTED_ROLE"),
+                ],
+            },
             "AUDIT_POLICIES": {
                 "label": "מדיניות ניטור (טבלת AUDIT_POLICIES)",
                 "required": ["AUDIT_POLICY_NAME", "IS_AUDIT_POLICY_ACTIVE"],
                 "required_any": [],
+            },
+            "AUDIT_TRAIL": {
+                "label": "ראיות Audit בפועל (Audit Trail)",
+                "required": [],
+                "required_any": [
+                    ("ACTION", "ACTION_NAME", "EVENT_ACTION", "EVENT", "STATEMENT_STRING", "COMMAND_TEXT"),
+                ],
+            },
+            "M_INIFILE_CONTENTS": {
+                "label": "הקשחת תצורה (טבלת M_INIFILE_CONTENTS)",
+                "required": [],
+                "required_any": [
+                    ("SECTION", "SECTION_NAME"),
+                    ("KEY", "KEY_NAME", "PARAMETER_NAME", "PROPERTY"),
+                    ("VALUE", "CONFIGURED_VALUE", "CURRENT_VALUE"),
+                ],
             },
         }
         
@@ -165,25 +292,25 @@ class AuditGUI:
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        # Tab 1: Settings
-        self.settings_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.settings_tab, text=" הגדרות מערכת ")
-        self._build_settings_tab()
-
-        # Tab 2: IPE Load
+        # Tab 1: IPE Load
         self.import_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.import_tab, text=" טעינת נתונים (IPE) ")
         self._build_import_tab()
 
-        # Tab 3: User Review Report
+        # Tab 2: User Review Report
         self.user_review_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.user_review_tab, text=" דוח סקירת משתמשים ")
         self._build_user_review_tab()
 
-        # Tab 4: Audit & Results
+        # Tab 3: Audit & Results
         self.audit_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.audit_tab, text=" ניתוח וממצאים ")
         self._build_audit_tab()
+
+        # Tab 4: Settings
+        self.settings_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.settings_tab, text=" הגדרות מערכת ")
+        self._build_settings_tab()
 
     def _rtl_hebrew_only(self, text):
         raw_text = "" if text is None else str(text)
@@ -205,10 +332,13 @@ class AuditGUI:
         self.export_ipe_btn.pack(side=tk.LEFT)
 
         slots = [
-            ("USERS", "משתמשים (טבלת USERS)", "רשימת משתמשים ותאריכי התחברות אחרונים"),
-            ("M_PASSWORD_POLICY", "מדיניות סיסמאות (טבלת M_PASSWORD_POLICY)", "פרמטרים והגדרות אבטחת סיסמה"),
-            ("GRANTED_PRIVILEGES", "הרשאות (טבלת GRANTED_PRIVILEGES)", "מיפוי הרשאות מערכת למשתמשים"),
-            ("AUDIT_POLICIES", "מדיניות ניטור (טבלת AUDIT_POLICIES)", "הגדרות לוגים ובקרות ניטור מערכתיות"),
+            ("USERS", "משתמשים (טבלת USERS)", "מקור חובה: רשימת משתמשים ותאריכי התחברות אחרונים"),
+            ("M_PASSWORD_POLICY", "מדיניות סיסמאות (טבלת M_PASSWORD_POLICY)", "מקור חובה: פרמטרים והגדרות אבטחת סיסמה"),
+            ("GRANTED_PRIVILEGES", "הרשאות (טבלת GRANTED_PRIVILEGES)", "מקור חובה: מיפוי הרשאות מערכת למשתמשים"),
+            ("GRANTED_ROLES", "הקצאות תפקידים (טבלת GRANTED_ROLES)", "מקור מומלץ: זיהוי הרשאות רגישות דרך Role inheritance"),
+            ("AUDIT_POLICIES", "מדיניות ניטור (טבלת AUDIT_POLICIES)", "מקור חובה: הגדרות לוגים ובקרות ניטור מערכתיות"),
+            ("AUDIT_TRAIL", "ראיות Audit בפועל (Audit Trail)", "מקור מומלץ: אימות פעולות מנהליות רגישות בפועל"),
+            ("M_INIFILE_CONTENTS", "הקשחת תצורה (טבלת M_INIFILE_CONTENTS)", "מקור חובה: הגדרות קונפיגורציה קריטיות ברמת INI של SAP HANA"),
         ]
 
         self.slot_status_vars = {}
@@ -316,7 +446,7 @@ class AuditGUI:
 
         return missing_columns, alternative_groups
 
-    def _format_validation_message(self, slot_key, file_name, missing_columns, alternative_groups):
+    def _format_validation_message(self, slot_key, file_name, missing_columns, alternative_groups, suggested_slots=None):
         metadata = self.slot_metadata[slot_key]
         details = []
 
@@ -326,6 +456,11 @@ class AuditGUI:
         for group in alternative_groups:
             details.append("נדרשת לפחות אחת מהעמודות: " + " / ".join(group))
 
+        if suggested_slots:
+            suggested_labels = [self.slot_metadata[item]["label"] for item in suggested_slots if item in self.slot_metadata]
+            if suggested_labels:
+                details.append("נראה שהקובץ מתאים יותר ל: " + " | ".join(suggested_labels))
+
         details_text = "\n".join(details)
         return (
             f"הקובץ '{file_name}' שויך לסלוט {metadata['label']}, אך מבנה העמודות שלו אינו תקין.\n\n"
@@ -333,14 +468,54 @@ class AuditGUI:
             "בדוק שהקובץ שיוצא מ-SAP HANA תואם לטבלה הנכונה וששורת הכותרות לא שונתה."
         )
 
+    def _find_compatible_slots(self, df):
+        compatible_slots = []
+        for candidate_slot in self.slot_metadata:
+            missing_columns, alternative_groups = self._validate_loaded_dataframe(candidate_slot, df)
+            if not missing_columns and not alternative_groups:
+                compatible_slots.append(candidate_slot)
+        return compatible_slots
+
+    def _persist_loaded_slot(self, slot_key, df, filename, extract_date, file_path):
+        self.loaded_dataframes[slot_key] = df
+        self.loaded_files[slot_key] = filename
+        self.loaded_extract_dates[slot_key] = extract_date
+
+        if slot_key == "GRANTED_PRIVILEGES":
+            self.loaded_dataframes["EFFECTIVE_PRIVILEGE_GRANTEES"] = df
+            self.loaded_files["EFFECTIVE_PRIVILEGE_GRANTEES"] = filename
+            self.loaded_extract_dates["EFFECTIVE_PRIVILEGE_GRANTEES"] = extract_date
+        elif slot_key == "GRANTED_ROLES":
+            self.loaded_dataframes["EFFECTIVE_ROLES"] = df
+            self.loaded_files["EFFECTIVE_ROLES"] = filename
+            self.loaded_extract_dates["EFFECTIVE_ROLES"] = extract_date
+        elif slot_key == "AUDIT_TRAIL":
+            self.loaded_dataframes["AUDIT_LOG"] = df
+            self.loaded_files["AUDIT_LOG"] = filename
+            self.loaded_extract_dates["AUDIT_LOG"] = extract_date
+
+        rows = len(df)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        self.ipe_records.append({
+            "סלוט במערכת": slot_key, "שם קובץ מקורי": filename,
+            "תאריך הפקה": extract_date, "כמות רשומות": rows, "זמן טעינה": timestamp, "נתיב מלא": file_path
+        })
+        self.db.save_ipe_load(slot_key, filename, extract_date, rows, file_path)
+
+        self.slot_status_vars[slot_key].set(f"✅ נטען: {filename}")
+        self.slot_delete_btns[slot_key].config(state=tk.NORMAL)
+        self.ipe_tree.insert("", tk.END, values=(slot_key, filename, extract_date, rows, timestamp))
+        self.db.log_activity("IPE Load", f"Slot: {slot_key}, File: {filename}, Extract Date: {extract_date}, Rows: {rows}", "User")
+
     def _validate_all_sources_before_analysis(self):
-        required_slots = ["USERS", "M_PASSWORD_POLICY", "GRANTED_PRIVILEGES", "AUDIT_POLICIES"]
+        required_slots = ["USERS", "M_PASSWORD_POLICY", "GRANTED_PRIVILEGES", "AUDIT_POLICIES", "M_INIFILE_CONTENTS"]
         missing_slots = [slot_key for slot_key in required_slots if slot_key not in self.loaded_dataframes]
         if missing_slots:
             slot_labels = [self.slot_metadata[slot_key]["label"] for slot_key in missing_slots]
             return (
                 False,
-                "לא ניתן להריץ ניתוח לפני שכל ארבעת מקורות החובה נטענו.\n\n"
+                "לא ניתן להריץ ניתוח לפני שכל חמשת מקורות החובה נטענו.\n\n"
                 + "מקורות חסרים:\n- "
                 + "\n- ".join(slot_labels)
             )
@@ -371,34 +546,30 @@ class AuditGUI:
 
         try:
             df = self._read_source_file(file_path)
-            missing_columns, alternative_groups = self._validate_loaded_dataframe(slot_key, df)
+            target_slot = slot_key
+            missing_columns, alternative_groups = self._validate_loaded_dataframe(target_slot, df)
             if missing_columns or alternative_groups:
-                raise ValueError(self._format_validation_message(slot_key, filename, missing_columns, alternative_groups))
+                compatible_slots = [candidate for candidate in self._find_compatible_slots(df) if candidate != slot_key]
+                if len(compatible_slots) == 1:
+                    detected_slot = compatible_slots[0]
+                    selected_label = self.slot_metadata[slot_key]["label"]
+                    detected_label = self.slot_metadata[detected_slot]["label"]
+                    should_redirect = messagebox.askyesno(
+                        "זוהה קובץ עבור סלוט אחר",
+                        f"הקובץ '{filename}' לא מתאים לסלוט {selected_label}, אך נראה מתאים לסלוט {detected_label}.\n\nהאם לטעון אותו אוטומטית לסלוט המתאים?",
+                    )
+                    if should_redirect:
+                        target_slot = detected_slot
+                        redirected_extract_date = self._normalize_extract_date(detected_slot, show_message=False)
+                        if redirected_extract_date:
+                            extract_date = redirected_extract_date
+                        missing_columns, alternative_groups = self._validate_loaded_dataframe(target_slot, df)
 
-            self.loaded_dataframes[slot_key] = df
-            self.loaded_files[slot_key] = filename
-            self.loaded_extract_dates[slot_key] = extract_date
+                if missing_columns or alternative_groups:
+                    raise ValueError(self._format_validation_message(target_slot, filename, missing_columns, alternative_groups, compatible_slots))
 
-            # Backward compatibility: analyzer still expects EFFECTIVE_PRIVILEGE_GRANTEES.
-            if slot_key == "GRANTED_PRIVILEGES":
-                self.loaded_dataframes["EFFECTIVE_PRIVILEGE_GRANTEES"] = df
-                self.loaded_files["EFFECTIVE_PRIVILEGE_GRANTEES"] = filename
-                self.loaded_extract_dates["EFFECTIVE_PRIVILEGE_GRANTEES"] = extract_date
-            
-            rows = len(df)
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
-            self.ipe_records.append({
-                "סלוט במערכת": slot_key, "שם קובץ מקורי": filename,
-                "תאריך הפקה": extract_date, "כמות רשומות": rows, "זמן טעינה": timestamp, "נתיב מלא": file_path
-            })
-            self.db.save_ipe_load(slot_key, filename, extract_date, rows, file_path)
-            
-            self.slot_status_vars[slot_key].set(f"✅ נטען: {filename}")
-            self.slot_delete_btns[slot_key].config(state=tk.NORMAL)
-            self.ipe_tree.insert("", tk.END, values=(slot_key, filename, extract_date, rows, timestamp))
-            self.db.log_activity("IPE Load", f"Slot: {slot_key}, File: {filename}, Extract Date: {extract_date}, Rows: {rows}", "User")
-            
+            self._persist_loaded_slot(target_slot, df, filename, extract_date, file_path)
+
         except Exception as e:
             self.loaded_dataframes.pop(slot_key, None)
             self.loaded_files.pop(slot_key, None)
@@ -422,6 +593,14 @@ class AuditGUI:
                 self.loaded_dataframes.pop("EFFECTIVE_PRIVILEGE_GRANTEES", None)
                 self.loaded_files.pop("EFFECTIVE_PRIVILEGE_GRANTEES", None)
                 self.loaded_extract_dates.pop("EFFECTIVE_PRIVILEGE_GRANTEES", None)
+            elif slot_key == "GRANTED_ROLES":
+                self.loaded_dataframes.pop("EFFECTIVE_ROLES", None)
+                self.loaded_files.pop("EFFECTIVE_ROLES", None)
+                self.loaded_extract_dates.pop("EFFECTIVE_ROLES", None)
+            elif slot_key == "AUDIT_TRAIL":
+                self.loaded_dataframes.pop("AUDIT_LOG", None)
+                self.loaded_files.pop("AUDIT_LOG", None)
+                self.loaded_extract_dates.pop("AUDIT_LOG", None)
             
             # עדכון ממשק
             self.slot_status_vars[slot_key].set("ממתין לטעינה...")
@@ -1394,6 +1573,7 @@ class AuditGUI:
         btn_frame.pack(fill=tk.X, pady=10)
         ttk.Button(btn_frame, text="טען ברירות מחדל", command=self._reset_settings_form).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="שמור הגדרות 💾", command=self._save_settings).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="ייצוא מיפוי בקרות 📄", command=self._export_control_mapping_report).pack(side=tk.LEFT, padx=5)
 
         form_frame = ttk.Frame(container)
         form_frame.pack(fill=tk.BOTH, expand=True)
@@ -1417,9 +1597,17 @@ class AuditGUI:
             "הרשאה אחת בכל שורה.",
             height=5,
         )
-        self._build_password_policy_section(form_frame, 3)
-        self._build_file_mapping_section(form_frame, 4)
-        self._build_user_review_settings_section(form_frame, 5)
+        self._build_list_section(
+            form_frame,
+            3,
+            "critical_roles",
+            "תפקידים רגישים",
+            "Role אחד בכל שורה. ניתן לכלול גם שמות תפקידים פנימיים או Emergency roles.",
+            height=4,
+        )
+        self._build_password_policy_section(form_frame, 4)
+        self._build_file_mapping_section(form_frame, 5)
+        self._build_user_review_settings_section(form_frame, 6)
 
         self._load_settings()
         _update_settings_scroll_region()
@@ -1537,7 +1725,10 @@ class AuditGUI:
             ("USERS", "קובץ משתמשים", "לדוגמה: users_export.csv"),
             ("M_PASSWORD_POLICY", "קובץ מדיניות סיסמאות", "לדוגמה: password_policy.csv"),
             ("GRANTED_PRIVILEGES", "קובץ הרשאות", "לדוגמה: privileges.csv"),
+            ("GRANTED_ROLES", "קובץ הקצאות תפקידים", "לדוגמה: granted_roles.csv"),
             ("AUDIT_POLICIES", "קובץ מדיניות Audit", "לדוגמה: audit_policies.csv"),
+            ("AUDIT_TRAIL", "קובץ Audit Trail", "לדוגמה: audit_trail.csv"),
+            ("M_INIFILE_CONTENTS", "קובץ הקשחת תצורה", "לדוגמה: m_inifile_contents.csv"),
         ]
         self.settings_widgets["file_mappings"] = {}
 
@@ -1627,7 +1818,7 @@ class AuditGUI:
         self._update_review_period_info_label()
 
     def _populate_settings_form(self, settings_data):
-        for list_key in ("critical_users", "critical_privileges"):
+        for list_key in ("critical_users", "critical_privileges", "critical_roles"):
             widget = self.settings_widgets[list_key]
             widget.delete("1.0", tk.END)
             widget.insert("1.0", "\n".join(settings_data.get(list_key, [])))
@@ -1659,9 +1850,9 @@ class AuditGUI:
             widget.insert("1.0", "\n".join(settings_data.get("user_type_rules", {}).get(field_name, [])))
 
     def _collect_settings_from_form(self):
-        settings_data = copy.deepcopy(self.DEFAULT_SETTINGS)
+        settings_data = self._get_settings_defaults()
 
-        for list_key in ("critical_users", "critical_privileges"):
+        for list_key in ("critical_users", "critical_privileges", "critical_roles"):
             raw_text = self.settings_widgets[list_key].get("1.0", tk.END)
             settings_data[list_key] = [line.strip() for line in raw_text.splitlines() if line.strip()]
 
@@ -1726,6 +1917,197 @@ class AuditGUI:
             settings_data["user_type_rules"][field_name] = [line.strip() for line in raw_text.splitlines() if line.strip()]
 
         return settings_data
+
+    def _build_control_mapping_rows(self):
+        mapping_template = [
+            {
+                "תחום בקרה": "Access Management",
+                "בקרה נבדקת": "שימוש במשתמשים קריטיים",
+                "מקור קלט": "USERS",
+                "רמת דרישה": "חובה",
+                "קטגוריית ממצא": "Access",
+                "slot_keys": ["USERS"],
+            },
+            {
+                "תחום בקרה": "Access Management",
+                "בקרה נבדקת": "הרשאות ניהול ישירות למשתמשים",
+                "מקור קלט": "GRANTED_PRIVILEGES",
+                "רמת דרישה": "חובה",
+                "קטגוריית ממצא": "Access",
+                "slot_keys": ["GRANTED_PRIVILEGES", "EFFECTIVE_PRIVILEGE_GRANTEES"],
+            },
+            {
+                "תחום בקרה": "Access Management",
+                "בקרה נבדקת": "הרשאות רגישות דרך Role inheritance",
+                "מקור קלט": "GRANTED_ROLES + GRANTED_PRIVILEGES",
+                "רמת דרישה": "מומלץ",
+                "קטגוריית ממצא": "Role-Based Access",
+                "slot_keys": ["GRANTED_ROLES", "EFFECTIVE_ROLES", "GRANTED_PRIVILEGES"],
+            },
+            {
+                "תחום בקרה": "Password Policy",
+                "בקרה נבדקת": "מדיניות סיסמאות בטבלת HANA",
+                "מקור קלט": "M_PASSWORD_POLICY",
+                "רמת דרישה": "חובה",
+                "קטגוריית ממצא": "Password Policy",
+                "slot_keys": ["M_PASSWORD_POLICY"],
+            },
+            {
+                "תחום בקרה": "Configuration Hardening",
+                "בקרה נבדקת": "הקשחת תצורה ופרמטרי INI",
+                "מקור קלט": "M_INIFILE_CONTENTS",
+                "רמת דרישה": "חובה",
+                "קטגוריית ממצא": "Configuration Hardening",
+                "slot_keys": ["M_INIFILE_CONTENTS"],
+            },
+            {
+                "תחום בקרה": "Audit Logging",
+                "בקרה נבדקת": "קיום והפעלה של Audit Policies",
+                "מקור קלט": "AUDIT_POLICIES",
+                "רמת דרישה": "חובה",
+                "קטגוריית ממצא": "Audit Config",
+                "slot_keys": ["AUDIT_POLICIES"],
+            },
+            {
+                "תחום בקרה": "Audit Logging",
+                "בקרה נבדקת": "ראיות Audit בפועל",
+                "מקור קלט": "AUDIT_TRAIL",
+                "רמת דרישה": "מומלץ",
+                "קטגוריית ממצא": "Audit Evidence",
+                "slot_keys": ["AUDIT_TRAIL", "AUDIT_LOG"],
+            },
+            {
+                "תחום בקרה": "User Access Review",
+                "בקרה נבדקת": "סקירת משתמשים וחריגים",
+                "מקור קלט": "USERS + GRANTED_PRIVILEGES",
+                "רמת דרישה": "תומך בקרה",
+                "קטגוריית ממצא": "User Review",
+                "slot_keys": ["USERS", "GRANTED_PRIVILEGES"],
+            },
+        ]
+
+        findings = self.current_findings or []
+        status_priority = {
+            "Non-Compliant": 0,
+            "Missing Evidence": 1,
+            "Exception Approved": 2,
+            "Compliant": 3,
+        }
+        export_rows = []
+
+        for template_row in mapping_template:
+            slot_keys = template_row["slot_keys"]
+            row = {key: value for key, value in template_row.items() if key != "slot_keys"}
+
+            loaded_files = []
+            for slot_key in slot_keys:
+                file_name = self.loaded_files.get(slot_key)
+                if file_name and file_name not in loaded_files:
+                    loaded_files.append(file_name)
+
+            loaded_count = sum(1 for slot_key in slot_keys if slot_key in self.loaded_dataframes)
+            if loaded_count == len(slot_keys):
+                source_status = "נטען"
+            elif loaded_count > 0:
+                source_status = "נטען חלקית"
+            else:
+                source_status = "לא נטען"
+
+            related_findings = [
+                finding for finding in findings
+                if getattr(finding, "source_slot", None) in slot_keys or getattr(finding, "category", None) == row["קטגוריית ממצא"]
+            ]
+            related_findings = sorted(
+                related_findings,
+                key=lambda finding: status_priority.get(getattr(finding, "status", ""), 99),
+            )
+
+            if related_findings:
+                finding_summary = " | ".join(
+                    f"{finding.title} ({finding.status})" for finding in related_findings[:3]
+                )
+            else:
+                finding_summary = "טרם בוצעה הרצה נוכחית או שלא זוהו ממצאים להצגה"
+
+            row["סטטוס מקור נוכחי"] = source_status
+            row["קבצים שנטענו"] = ", ".join(loaded_files) if loaded_files else "-"
+            row["ממצא/ים מההרצה הנוכחית"] = finding_summary
+            row["סטטוס כיסוי"] = "מיושם"
+            export_rows.append(row)
+
+        return export_rows
+
+    def _build_control_mapping_markdown(self, export_rows):
+        headers = [
+            "תחום בקרה",
+            "בקרה נבדקת",
+            "מקור קלט",
+            "רמת דרישה",
+            "קטגוריית ממצא",
+            "סטטוס מקור נוכחי",
+            "קבצים שנטענו",
+            "ממצא/ים מההרצה הנוכחית",
+            "סטטוס כיסוי",
+        ]
+        lines = [
+            "# דוח מיפוי בקרות מתוך המערכת",
+            "",
+            f"תאריך ייצוא: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"תקופת ביקורת: {self.period_var.get()}",
+            "",
+            "| " + " | ".join(headers) + " |",
+            "|" + "|".join(["---"] * len(headers)) + "|",
+        ]
+
+        for row in export_rows:
+            formatted_values = []
+            for header in headers:
+                value = str(row.get(header, "-")).replace("|", "/")
+                formatted_values.append(value)
+            lines.append("| " + " | ".join(formatted_values) + " |")
+
+        return "\n".join(lines)
+
+    def _export_control_mapping_report(self):
+        try:
+            export_rows = self._build_control_mapping_rows()
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            save_path = filedialog.asksaveasfilename(
+                defaultextension=".xlsx",
+                initialfile=f"EY_Control_Mapping_{self.period_var.get()}_{timestamp}.xlsx",
+                filetypes=[
+                    ("Excel Workbook", "*.xlsx"),
+                    ("CSV File", "*.csv"),
+                    ("Markdown File", "*.md"),
+                ],
+            )
+            if not save_path:
+                return
+
+            export_df = pd.DataFrame(export_rows)
+            suffix = Path(save_path).suffix.lower()
+
+            if suffix == ".csv":
+                export_df.to_csv(save_path, index=False, encoding="utf-8-sig")
+            elif suffix == ".md":
+                markdown_content = self._build_control_mapping_markdown(export_rows)
+                with open(save_path, "w", encoding="utf-8") as output_file:
+                    output_file.write(markdown_content)
+            else:
+                metadata_rows = [
+                    {"שדה": "תקופת ביקורת", "ערך": self.period_var.get()},
+                    {"שדה": "תאריך ייצוא", "ערך": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+                    {"שדה": "מספר ממצאים בהרצה הנוכחית", "ערך": len(self.current_findings or [])},
+                    {"שדה": "מספר מקורות שנטענו", "ערך": len(self.loaded_dataframes)},
+                ]
+                with pd.ExcelWriter(save_path) as writer:
+                    export_df.to_excel(writer, index=False, sheet_name="Control Mapping")
+                    pd.DataFrame(metadata_rows).to_excel(writer, index=False, sheet_name="Metadata")
+
+            self.db.log_activity("Export Control Mapping", f"Exported control mapping report to {save_path}", "User")
+            messagebox.showinfo("הצלחה", "דוח מיפוי הבקרות יוצא בהצלחה.")
+        except Exception as error:
+            messagebox.showerror("שגיאת ייצוא", f"לא ניתן לייצא את דוח מיפוי הבקרות.\n\nפירוט: {error}")
 
     def _reset_settings_form(self):
         self._populate_settings_form(copy.deepcopy(self.DEFAULT_SETTINGS))

@@ -6,6 +6,10 @@
         "_SYS_REPO",
         "XSSQLCC_AUTO_USER"
     ],
+    "critical_roles": [
+        "SAP_INTERNAL_HANA_SUPPORT",
+        "PUBLIC"
+    ],
     "critical_privileges": [
         "AUDIT ADMIN",
         "AUDIT OPERATOR",
@@ -37,8 +41,107 @@
         "USERS": "users_export.csv",
         "M_PASSWORD_POLICY": "password_policy.csv",
         "GRANTED_PRIVILEGES": "privileges.csv",
-        "AUDIT_POLICIES": "audit_policies.csv"
+        "GRANTED_ROLES": "granted_roles.csv",
+        "AUDIT_POLICIES": "audit_policies.csv",
+        "AUDIT_TRAIL": "audit_trail.csv",
+        "M_INIFILE_CONTENTS": "m_inifile_contents.csv"
     },
+    "audit_event_keywords": [
+        "CREATE USER",
+        "ALTER USER",
+        "DROP USER",
+        "CREATE ROLE",
+        "DROP ROLE",
+        "GRANT ROLE",
+        "GRANT PRIVILEGE",
+        "REVOKE",
+        "ALTER SYSTEM",
+        "AUDIT POLICY",
+        "LOGIN"
+    ],
+    "ini_security_defaults": [
+        {
+            "file_name": "global.ini",
+            "section": "auditing configuration",
+            "key": "global_auditing_state",
+            "expected_value": "true",
+            "comparison_rule": "Exact",
+            "risk_level": "High",
+            "title": "Audit trail גלובלי חייב להיות פעיל"
+        },
+        {
+            "file_name": "global.ini",
+            "section": "persistence",
+            "key": "log_mode",
+            "expected_value": "normal",
+            "comparison_rule": "Exact",
+            "risk_level": "High",
+            "title": "Log mode חייב להיות NORMAL"
+        },
+        {
+            "file_name": "indexserver.ini",
+            "section": "password policy",
+            "key": "detailed_error_on_connect",
+            "expected_value": "false",
+            "comparison_rule": "Exact",
+            "risk_level": "Medium",
+            "title": "אין לחשוף הודעות שגיאה מפורטות בהתחברות"
+        },
+        {
+            "file_name": "indexserver.ini",
+            "section": "password policy",
+            "key": "password_lock_for_system_user",
+            "expected_value": "true",
+            "comparison_rule": "Exact",
+            "risk_level": "High",
+            "title": "נעילת משתמשי SYSTEM חייבת להיות פעילה"
+        },
+        {
+            "file_name": "indexserver.ini",
+            "section": "password policy",
+            "key": "force_first_password_change",
+            "expected_value": "true",
+            "comparison_rule": "Exact",
+            "risk_level": "Medium",
+            "title": "חובת החלפת סיסמה ראשונית חייבת להיות פעילה"
+        },
+        {
+            "file_name": "indexserver.ini",
+            "section": "password policy",
+            "key": "minimal_password_length",
+            "expected_value": 8,
+            "comparison_rule": "Minimum",
+            "risk_level": "High",
+            "title": "אורך סיסמה מינימלי חייב להיות לפחות 8"
+        },
+        {
+            "file_name": "indexserver.ini",
+            "section": "password policy",
+            "key": "maximum_invalid_connect_attempts",
+            "expected_value": 6,
+            "comparison_rule": "Maximum",
+            "risk_level": "Medium",
+            "title": "מספר ניסיונות התחברות שגויים חייב להיות מוגבל"
+        },
+        {
+            "file_name": "indexserver.ini",
+            "section": "password policy",
+            "key": "last_used_passwords",
+            "expected_value": 5,
+            "comparison_rule": "Minimum",
+            "risk_level": "Medium",
+            "title": "היסטוריית סיסמאות חייבת לכלול לפחות 5 ערכים"
+        },
+        {
+            "file_name": "indexserver.ini",
+            "section": "password policy",
+            "key": "password_expire_warning_time",
+            "expected_value": 14,
+            "comparison_rule": "Minimum",
+            "risk_level": "Low",
+            "title": "יש להתריע מראש לפני פקיעת סיסמה"
+        }
+    ],
     "inactive_days_threshold": 120,
     "user_review_period": {
         "start_date": "2025-01-01",
