@@ -1,0 +1,14 @@
+﻿Migration verification
+C:\Users\PC\Documents\Ayalon\ITGC_SAP_Hana_DB\ITGC_SAP_DB_Python_20260415
+## main...origin/main
+?? __pycache__/DataClasses.cpython-312.pyc
+?? core/__pycache__/analyzer.cpython-312.pyc
+?? core/__pycache__/support_logger.cpython-312.pyc
+?? gui/__pycache__/app_new.cpython-312.pyc
+?? migration_verify.txt
+?? tests/__pycache__/test_analyzer_extended.cpython-312-pytest-7.4.4.pyc
+?? tests/__pycache__/test_gui_slot_detection.cpython-312-pytest-7.4.4.pyc
+?? tests/__pycache__/test_support_logging.cpython-312-pytest-7.4.4.pyc
+Python 3.13.4
+........                                                                 [100%]
+8 passed in 3.76s
