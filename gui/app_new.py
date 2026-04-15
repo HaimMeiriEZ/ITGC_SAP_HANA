@@ -22,6 +22,7 @@ try:
     from DatabaseManager import DatabaseManager
     from core.importer import DataImporter
     from core.analyzer import AuditAnalyzer
+    from core.support_logger import SupportLogger
     from core.user_review import build_user_review_report, export_user_review_to_excel, export_user_review_to_pdf
 except ImportError as e:
     print(f"שגיאת ייבוא: וודא שכל הקבצים נמצאים בנתיב הנכון. פירוט: {e}")
@@ -184,6 +185,7 @@ class AuditGUI:
         self.root.geometry("1150x900")
         self.root.minsize(1050, 800)
         self.root.configure(bg="#f8f9fa")
+        self.support_logger = SupportLogger(log_dir=PROJECT_ROOT / "logs")
 
         # נכסי נתונים
         self.loaded_dataframes = {}
@@ -543,6 +545,7 @@ class AuditGUI:
             return
 
         filename = os.path.basename(file_path)
+        self._log("החל ניסיון טעינת קובץ", slot=slot_key, filename=filename, file_path=file_path)
 
         try:
             df = self._read_source_file(file_path)
@@ -569,6 +572,7 @@ class AuditGUI:
                     raise ValueError(self._format_validation_message(target_slot, filename, missing_columns, alternative_groups, compatible_slots))
 
             self._persist_loaded_slot(target_slot, df, filename, extract_date, file_path)
+            self._log("טעינת הקובץ הושלמה בהצלחה", slot=target_slot, filename=filename, rows=len(df))
 
         except Exception as e:
             self.loaded_dataframes.pop(slot_key, None)
@@ -576,9 +580,10 @@ class AuditGUI:
             self.loaded_extract_dates.pop(slot_key, None)
             self.slot_status_vars[slot_key].set(f"❌ שגיאה בטעינת: {filename}")
             self.slot_delete_btns[slot_key].config(state=tk.DISABLED)
+            self._log_error("שגיאה בטעינת קובץ מקור", e, requested_slot=slot_key, filename=filename, file_path=file_path)
             messagebox.showerror(
                 "שגיאת טעינה",
-                f"לא ניתן לטעון את הקובץ '{filename}' לסלוט {self.slot_metadata[slot_key]['label']}.\n\nסיבה:\n{str(e)}",
+                f"לא ניתן לטעון את הקובץ '{filename}' לסלוט {self.slot_metadata[slot_key]['label']}.\n\nסיבה:\n{str(e)}\n\nפירוט מלא נשמר בתיקיית הלוגים עבור צוות התמיכה.",
             )
 
     def _delete_file(self, slot_key):
@@ -1183,6 +1188,8 @@ class AuditGUI:
         ttk.Label(ctrl_frame, text="ביצוע ניתוח בקרות ITGC", font=("Segoe UI", 16, "bold")).pack(side=tk.RIGHT)
         self.export_findings_btn = ttk.Button(ctrl_frame, text="ייצוא ממצאים ל-Excel", command=self._export_findings_to_excel)
         self.export_findings_btn.pack(side=tk.LEFT, padx=10)
+        self.open_logs_btn = ttk.Button(ctrl_frame, text="פתח תיקיית לוגים", command=self._open_logs_folder)
+        self.open_logs_btn.pack(side=tk.LEFT, padx=10)
         self.run_btn = ttk.Button(ctrl_frame, text="הרץ ניתוח ⚡", command=self._run_audit)
         self.run_btn.pack(side=tk.LEFT, padx=10)
         ttk.Entry(ctrl_frame, textvariable=self.period_var, width=12).pack(side=tk.LEFT)
@@ -1447,11 +1454,15 @@ class AuditGUI:
 
         is_valid, validation_message = self._validate_all_sources_before_analysis()
         if not is_valid:
+            self._log("הרצת ניתוח נחסמה עקב כשל בבדיקת תקינות", period=self.period_var.get())
             messagebox.showerror("בדיקת תקינות נכשלה", validation_message)
             return
 
+        loaded_slots = ", ".join(sorted(self.loaded_dataframes.keys()))
+
         try:
             self.run_btn.config(state=tk.DISABLED)
+            self._log("החל ניתוח ITGC", period=self.period_var.get(), loaded_slots=loaded_slots)
             analyzer = AuditAnalyzer(config=self.importer.config, whitelist=self.db.get_whitelist())
             findings = analyzer.run_all_checks(self.loaded_dataframes, period_id=self.period_var.get())
             findings.extend(self._build_findings_from_user_review())
@@ -1459,14 +1470,18 @@ class AuditGUI:
             self.current_findings = findings
             self._update_filter_options()
             self._refresh_findings_table()
-            if findings: self.db.save_findings([vars(f) for f in findings])
+            if findings:
+                self.db.save_findings([vars(f) for f in findings])
+            self._log("ניתוח ITGC הושלם", period=self.period_var.get(), findings_count=len(findings))
             messagebox.showinfo("הושלם", f"נמצאו {len(findings)} חריגות.")
         except Exception as e:
+            self._log_error("שגיאה בהרצת ניתוח ITGC", e, period=self.period_var.get(), loaded_slots=loaded_slots)
             messagebox.showerror(
                 "שגיאה בהרצת ניתוח",
                 "הניתוח נכשל לאחר טעינת הקבצים.\n\n"
                 f"פירוט טכני:\n{str(e)}\n\n"
-                "אם השגיאה נמשכת, בדוק שהקבצים נטענו לסלוטים הנכונים ושהכותרות בהם תואמות להגדרות המערכת.",
+                "אם השגיאה נמשכת, בדוק שהקבצים נטענו לסלוטים הנכונים ושהכותרות בהם תואמות להגדרות המערכת.\n"
+                "לצוות התמיכה נשמרו פרטים מלאים בתיקיית הלוגים.",
             )
         finally:
             self.run_btn.config(state=tk.NORMAL)
@@ -2119,12 +2134,33 @@ class AuditGUI:
                 json.dump(new_config, f, indent=4, ensure_ascii=False)
             self.importer.config = new_config
             self._update_review_period_info_label()
+            self._log("הגדרות המערכת נשמרו", settings_path=str(self.settings_path))
             messagebox.showinfo("הצלחה", "ההגדרות עודכנו.")
         except Exception as e:
+            self._log_error("שגיאה בשמירת הגדרות", e, settings_path=str(self.settings_path))
             messagebox.showerror("שגיאת הגדרות", str(e))
 
-    def _log(self, msg):
+    def _open_logs_folder(self):
+        log_dir = self.support_logger.log_dir if hasattr(self, "support_logger") else PROJECT_ROOT / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        self._log("נפתחה תיקיית הלוגים", log_dir=str(log_dir))
+        try:
+            os.startfile(log_dir)
+        except Exception as error:
+            self._log_error("לא ניתן לפתוח את תיקיית הלוגים", error, log_dir=str(log_dir))
+            messagebox.showerror("שגיאת לוגים", f"לא ניתן לפתוח את תיקיית הלוגים.\n\n{error}\n\nהנתיב הוא:\n{log_dir}")
+
+    def _log(self, msg, **context):
         print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+        support_logger = getattr(self, "support_logger", None)
+        if support_logger is not None:
+            support_logger.process(msg, **context)
+
+    def _log_error(self, msg, error=None, **context):
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] ERROR: {msg} | {error}")
+        support_logger = getattr(self, "support_logger", None)
+        if support_logger is not None:
+            support_logger.error(msg, exception=error, **context)
 
 if __name__ == "__main__":
     root = tk.Tk()

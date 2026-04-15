@@ -1,0 +1,5 @@
+[2026-04-15 10:20:43] [ERROR] Smoke test error entry | exception_message="support-log-check" | exception_type="RuntimeError" | source="validation"
+Traceback (most recent call last):
+  File "<string>", line 5, in <module>
+    raise RuntimeError('support-log-check')
+RuntimeError: support-log-check
