@@ -1,0 +1,5 @@
+;AUDIT_POLICY_NAME;IS_AUDIT_POLICY_ACTIVE
+1;Critical_Actions_Audit;TRUE
+2;Privilege_Changes_Monitor;FALSE
+3;User_Lock_Logging;TRUE
+4;Emergency_Access_Audit;FALSE

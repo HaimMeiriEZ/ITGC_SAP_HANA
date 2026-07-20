@@ -6,11 +6,110 @@ from core.analyzer import AuditAnalyzer
 BASE_CONFIG = {
     "critical_users": ["SYSTEM"],
     "critical_privileges": ["ROLE ADMIN", "USER ADMIN", "INIFILE ADMIN"],
+    "privilege_rules": {
+        "flag_grant_option_on_critical": True,
+        "business_schema_patterns": ["SYS_BIC", "*HDI*", "HDI_*"],
+        "business_object_privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "exclude_schema_patterns": ["_SYS_*", "SYS", "SYSTEM"],
+    },
     "password_policy_defaults": {},
     "ini_security_defaults": [],
     "critical_roles": [],
     "audit_event_keywords": ["CREATE USER", "ALTER USER", "GRANT ROLE", "AUDIT POLICY"],
 }
+
+
+def _run_privilege_checks(df_privs, extra_frames=None):
+    analyzer = AuditAnalyzer(config=BASE_CONFIG, whitelist=[])
+    frames = {"EFFECTIVE_PRIVILEGE_GRANTEES": df_privs}
+    if extra_frames:
+        frames.update(extra_frames)
+    return analyzer.run_all_checks(frames, period_id="2026-Q2")
+
+
+def test_critical_privilege_to_non_dba_is_flagged():
+    df_privs = pd.DataFrame([
+        {"GRANTEE": "ALICE", "PRIVILEGE": "USER ADMIN", "GRANTEE_TYPE": "USER", "IS_GRANTABLE": "FALSE"},
+    ])
+    findings = _run_privilege_checks(df_privs)
+    assert any(
+        "USER ADMIN" in finding.title and "ALICE" in finding.title and "ADMIN OPTION" not in finding.title
+        for finding in findings
+        if finding.status == "Non-Compliant"
+    )
+
+
+def test_critical_privilege_to_dba_is_not_flagged():
+    df_privs = pd.DataFrame([
+        {"GRANTEE": "SYSTEM", "PRIVILEGE": "USER ADMIN", "GRANTEE_TYPE": "USER", "IS_GRANTABLE": "FALSE"},
+    ])
+    findings = _run_privilege_checks(df_privs)
+    assert not any(
+        "USER ADMIN" in finding.title and finding.status == "Non-Compliant" and "ADMIN OPTION" not in finding.title
+        for finding in findings
+    )
+
+
+def test_grant_option_on_critical_flags_dba_too():
+    df_privs = pd.DataFrame([
+        {"GRANTEE": "SYSTEM", "PRIVILEGE": "ROLE ADMIN", "GRANTEE_TYPE": "USER", "IS_GRANTABLE": "TRUE"},
+    ])
+    findings = _run_privilege_checks(df_privs)
+    assert any(
+        "ADMIN OPTION" in finding.title and "ROLE ADMIN" in finding.title and finding.status == "Non-Compliant"
+        for finding in findings
+    )
+
+
+def test_business_schema_dml_flagged():
+    df_privs = pd.DataFrame([
+        {
+            "GRANTEE": "ALICE",
+            "PRIVILEGE": "SELECT",
+            "GRANTEE_TYPE": "USER",
+            "SCHEMA_NAME": "SYS_BIC",
+            "IS_GRANTABLE": "FALSE",
+        },
+    ])
+    findings = _run_privilege_checks(df_privs)
+    assert any(
+        "schema עסקי SYS_BIC" in finding.title and finding.status == "Non-Compliant"
+        for finding in findings
+    )
+
+
+def test_internal_sys_schema_not_flagged():
+    df_privs = pd.DataFrame([
+        {
+            "GRANTEE": "ALICE",
+            "PRIVILEGE": "SELECT",
+            "GRANTEE_TYPE": "USER",
+            "SCHEMA_NAME": "_SYS_STATISTICS",
+            "IS_GRANTABLE": "FALSE",
+        },
+    ])
+    findings = _run_privilege_checks(df_privs)
+    assert not any(
+        "schema עסקי" in finding.title and finding.status == "Non-Compliant"
+        for finding in findings
+    )
+
+
+def test_business_schema_dml_on_dba_not_flagged():
+    df_privs = pd.DataFrame([
+        {
+            "GRANTEE": "SYSTEM",
+            "PRIVILEGE": "INSERT",
+            "GRANTEE_TYPE": "USER",
+            "SCHEMA_NAME": "SYS_BIC",
+            "IS_GRANTABLE": "FALSE",
+        },
+    ])
+    findings = _run_privilege_checks(df_privs)
+    assert not any(
+        "schema עסקי SYS_BIC" in finding.title and finding.status == "Non-Compliant"
+        for finding in findings
+    )
 
 
 def test_role_assignment_inheriting_critical_privilege_is_flagged():

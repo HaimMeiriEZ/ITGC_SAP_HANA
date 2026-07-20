@@ -1,0 +1,64 @@
+{
+  "_schema_version": 1,
+  "_description": "הגדרות slot ליצואי SAP HANA DB",
+  "slots": {
+    "USERS": {
+      "label_he": "משתמשים (טבלת USERS)",
+      "filename_patterns": ["*user*", "*USERS*", "hana usert*"],
+      "required_columns": ["USER_NAME"],
+      "required_any_groups": [["LAST_SUCCESSFUL_CONNECT", "LAST_SUCCESSFUL_CONNECT_DATE"]],
+      "optional_columns": ["USER_DEACTIVATED", "IS_RESTRICTED_DETAILS", "LAST_INVALID_CONNECT_ATTEMPT"]
+    },
+    "M_PASSWORD_POLICY": {
+      "label_he": "מדיניות סיסמאות (M_PASSWORD_POLICY)",
+      "filename_patterns": ["*password*", "*M_PASSWORD_POLICY*"],
+      "required_columns": ["PROPERTY", "VALUE"],
+      "required_any_groups": [],
+      "optional_columns": []
+    },
+    "GRANTED_PRIVILEGES": {
+      "label_he": "הרשאות (GRANTED_PRIVILEGES)",
+      "filename_patterns": ["*priv*", "*PRIVILEGE*"],
+      "required_columns": ["GRANTEE", "PRIVILEGE"],
+      "required_any_groups": [],
+      "optional_columns": ["OBJECT_TYPE", "IS_VALID", "GRANTEE_TYPE"]
+    },
+    "GRANTED_ROLES": {
+      "label_he": "הקצאות תפקידים (GRANTED_ROLES)",
+      "filename_patterns": ["*role*", "*GRANTED_ROLES*"],
+      "required_columns": [],
+      "required_any_groups": [
+        ["GRANTEE", "GRANTEE_NAME", "USER_NAME", "USER"],
+        ["ROLE_NAME", "ROLE", "GRANTED_ROLE_NAME", "GRANTED_ROLE"]
+      ],
+      "optional_columns": ["GRANTEE_TYPE", "IS_GRANTED_BY_LDAP"]
+    },
+    "AUDIT_POLICIES": {
+      "label_he": "מדיניות ניטור (AUDIT_POLICIES)",
+      "filename_patterns": ["*AUDIT_POLIC*", "*audit_polic*"],
+      "required_columns": ["AUDIT_POLICY_NAME", "IS_AUDIT_POLICY_ACTIVE"],
+      "required_any_groups": [],
+      "optional_columns": []
+    },
+    "AUDIT_TRAIL": {
+      "label_he": "ראיות Audit (Audit Trail)",
+      "filename_patterns": ["*AUDIT_TRAIL*", "*audit_trail*"],
+      "required_columns": [],
+      "required_any_groups": [
+        ["ACTION", "ACTION_NAME", "EVENT_ACTION", "EVENT", "STATEMENT_STRING", "COMMAND_TEXT"]
+      ],
+      "optional_columns": []
+    },
+    "M_INIFILE_CONTENTS": {
+      "label_he": "הקשחת תצורה (M_INIFILE_CONTENTS)",
+      "filename_patterns": ["*INIFILE*", "*ini*"],
+      "required_columns": [],
+      "required_any_groups": [
+        ["SECTION", "SECTION_NAME"],
+        ["KEY", "KEY_NAME", "PARAMETER_NAME", "PROPERTY"],
+        ["VALUE", "CONFIGURED_VALUE", "CURRENT_VALUE"]
+      ],
+      "optional_columns": ["FILE_NAME"]
+    }
+  }
+}

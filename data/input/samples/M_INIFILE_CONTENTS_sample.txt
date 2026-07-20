@@ -1,0 +1,7 @@
+;SECTION;KEY;VALUE
+1;auditing configuration;global_auditing_state;TRUE
+2;auditing configuration;default_audit_trail_type;SYSLOG
+3;password policy;minimal_password_length;8
+4;password policy;password_lock_time;1440
+5;password policy;force_first_password_change;TRUE
+6;auditing configuration;default_audit_trail_path;?

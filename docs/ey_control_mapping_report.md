@@ -10,7 +10,7 @@
 | תחום בקרה | בקרה נבדקת | מקור קלט | רמת דרישה | קטגוריית ממצא | דוגמאות לממצאים שהכלי מפיק | סטטוס כיסוי |
 |---|---|---|---|---|---|---|
 | Access Management | שימוש במשתמשים קריטיים | USERS | חובה | Access | שימוש במשתמש קריטי; לא זוהה שימוש במשתמשים קריטיים | מיושם |
-| Access Management | הרשאות ניהול ישירות למשתמשים | GRANTED_PRIVILEGES | חובה | Access | הרשאה קריטית חריגה; לא זוהו הרשאות קריטיות חריגות | מיושם |
+| Access Management | הרשאות ניהול ישירות למשתמשים | GRANTED_PRIVILEGES | חובה | Access | הרשאה קריטית חריגה; ADMIN OPTION על הרשאה קריטית; הרשאת DML על schema עסקי; לא זוהו הרשאות קריטיות חריגות | מיושם |
 | Access Management | הרשאות רגישות דרך Role inheritance | GRANTED_ROLES + GRANTED_PRIVILEGES | מומלץ | Role-Based Access | תפקיד רגיש הוקצה; תפקיד הוקצה ל-PUBLIC; קלט GRANTED_ROLES חסר | מיושם |
 | Password Policy | מדיניות סיסמאות בטבלת HANA | M_PASSWORD_POLICY | חובה | Password Policy | חריגה במדיניות סיסמאות; מדיניות סיסמאות תקינה | מיושם |
 | Password Policy | פרמטרי סיסמאות ברמת INI | M_INIFILE_CONTENTS | חובה | Configuration Hardening | אורך סיסמה מינימלי; חובת החלפת סיסמה ראשונית; היסטוריית סיסמאות; ניסיונות התחברות שגויים | מיושם |
@@ -42,8 +42,29 @@
 |---|---|
 | USERS / GRANTED_PRIVILEGES / AUDIT_POLICIES / M_INIFILE_CONTENTS | [core/analyzer.py](core/analyzer.py) |
 | טעינת קבצים, ולידציה, תצוגה למשתמש | [gui/app_new.py](gui/app_new.py) |
-| הגדרות baseline וערכי סף | [config/settings.json](config/settings.json) |
+| הגדרות baseline וערכי סף | [config/settings.json](config/settings.json) (`critical_privileges`, `privilege_rules`) |
 | בדיקות רגרסיה | [tests/test_analyzer_extended.py](tests/test_analyzer_extended.py) |
 
 ## מסקנה
-הכלי מכסה כעת את שכבות הבקרה המרכזיות עבור SAP HANA DB ברמת EY-oriented review: גישות, סיסמאות, Audit, הקשחת תצורה, והרשאות דרך תפקידים. בנוסף, הכלי מתעד גם פערי ראיות כאשר קובצי קלט מומלצים או חובה אינם זמינים.
+הכלי מכסה כעת את שכבות הבקרה המרכזיות עבור SAP HANA DB ברמת EY-oriented review: גישות, סיסמאות, Audit, הקשחת תצורה, והרשאות דרך תפקידים. בנוסף, בדיקות GRANTED_PRIVILEGES כוללות:
+- **הרשאות System קריטיות** — לפי `critical_privileges`; מורשים: `critical_users` (DBA)
+- **ADMIN OPTION** — `IS_GRANTABLE=TRUE` על הרשאה קריטית (גם ל-DBA) — לפי `privilege_rules.flag_grant_option_on_critical`
+- **Object Privileges על schemas עסקיים** — SELECT/INSERT/UPDATE/DELETE לפי `privilege_rules.business_schema_patterns`
+
+בנוסף, הכלי מתעד גם פערי ראיות כאשר קובצי קלט מומלצים או חובה אינם זמינים.
+
+## Placeholder Control IDs (Phase 1)
+
+| control_id | domain | EY mapping | required_slots |
+|---|---|---|---|
+| `DB-AM-01_PLACEHOLDER` | Access | משתמשים קריטיים | USERS |
+| `DB-AM-02_PLACEHOLDER` | Access | הרשאות ניהול ישירות | GRANTED_PRIVILEGES |
+| `DB-AM-03_PLACEHOLDER` | Access | הרשאות דרך roles | GRANTED_ROLES, GRANTED_PRIVILEGES |
+| `DB-PP-01_PLACEHOLDER` | Password | מדיניות סיסמה (טבלה) | M_PASSWORD_POLICY |
+| `DB-PP-02_PLACEHOLDER` | Password | פרמטרי INI | M_INIFILE_CONTENTS |
+| `DB-AL-01_PLACEHOLDER` | Audit | מדיניות audit | AUDIT_POLICIES |
+| `DB-AL-02_PLACEHOLDER` | Audit | audit trail | AUDIT_TRAIL |
+| `DB-CF-01_PLACEHOLDER` | Config | hardening INI | M_INIFILE_CONTENTS |
+| `DB-UAR-01_PLACEHOLDER` | UAR | סקירת גישה | USERS, GRANTED_PRIVILEGES |
+
+למילוי מלא: [docs/CONTROLS_CATALOG_FILL_GUIDE.md](CONTROLS_CATALOG_FILL_GUIDE.md) ו-[data/knowledge_base/controls_catalog.json](../data/knowledge_base/controls_catalog.json).

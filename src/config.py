@@ -1,0 +1,28 @@
+"""Project configuration — SAP HANA DB ITGC tool."""
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DOMAIN = "HANA_DB"
+
+SLOT_KEYS = [
+    "USERS",
+    "M_PASSWORD_POLICY",
+    "GRANTED_PRIVILEGES",
+    "GRANTED_ROLES",
+    "AUDIT_POLICIES",
+    "AUDIT_TRAIL",
+    "M_INIFILE_CONTENTS",
+]
+
+KNOWLEDGE_BASE_DIR = PROJECT_ROOT / "data" / "knowledge_base"
+SAMPLES_DIR = PROJECT_ROOT / "data" / "input" / "samples"
+
+SLOT_DEFAULT_CONTROLS: dict[str, list[str]] = {
+    "USERS": ["DB-AM-01_PLACEHOLDER", "DB-UAR-01_PLACEHOLDER"],
+    "M_PASSWORD_POLICY": ["DB-PP-01_PLACEHOLDER"],
+    "GRANTED_PRIVILEGES": ["DB-AM-02_PLACEHOLDER", "DB-UAR-01_PLACEHOLDER"],
+    "GRANTED_ROLES": ["DB-AM-03_PLACEHOLDER"],
+    "AUDIT_POLICIES": ["DB-AL-01_PLACEHOLDER"],
+    "AUDIT_TRAIL": ["DB-AL-02_PLACEHOLDER"],
+    "M_INIFILE_CONTENTS": ["DB-PP-02_PLACEHOLDER", "DB-CF-01_PLACEHOLDER"],
+}

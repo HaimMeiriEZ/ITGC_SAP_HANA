@@ -1,0 +1,27 @@
+{
+  "$comment_schema": "תבנית ל-entry בקטלוג בקרות — העתק ל-controls_catalog.json ומלא",
+  "controls": [
+    {
+      "$comment_control_id": "מזהה Ayalon סופי (כרגע DB-XX-NN_PLACEHOLDER)",
+      "control_id": "DB-AM-01_PLACEHOLDER",
+      "$comment_title_he": "כותרת קצרה בעברית",
+      "title_he": "",
+      "$comment_domain": "Access | Password | Audit | Config | UAR",
+      "domain": "Access",
+      "category": "Access Management",
+      "$comment_required_slots": "רשימת slot keys מ-slot_definitions.json",
+      "required_slots": ["USERS"],
+      "$comment_implementation_status": "placeholder | implemented",
+      "implementation_status": "placeholder",
+      "$comment_validator_ref": "null או שם פונקציה ב-src/validators/",
+      "validator_ref": null,
+      "in_scope": true,
+      "analysis_type": "",
+      "description": "",
+      "process": "",
+      "risk_description": "",
+      "test_steps_override": "",
+      "notes": ""
+    }
+  ]
+}

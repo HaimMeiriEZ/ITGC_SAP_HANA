@@ -59,6 +59,8 @@ try:
         export_user_review_to_excel,
         export_user_review_to_pdf,
     )
+    from src.pipeline import get_controls_catalog_summary
+    from src.readers.hana_export_reader import read_hana_export
 except ImportError as e:
     print(f"שגיאת ייבוא: וודא שכל הקבצים נמצאים בנתיב הנכון. פירוט: {e}")
     raise
@@ -76,21 +78,45 @@ class SimpleVar:
 
 
 class AuditGUI:
+    use_src_reader = True
+
     DEFAULT_SETTINGS = {
         "critical_users": ["SYSTEM", "SAPHANADB", "SYS", "_SYS_REPO", "XSSQLCC_AUTO_USER"],
         "critical_roles": ["SAP_INTERNAL_HANA_SUPPORT", "PUBLIC"],
         "critical_privileges": [
             "AUDIT ADMIN",
             "AUDIT OPERATOR",
+            "BACKUP ADMIN",
+            "CREATE ANY",
+            "CREATE CONNECTION",
+            "CREATE REMOTE SOURCE",
+            "CREATE SCHEMA",
+            "CREATE STRUCTURED PRIVILEGE",
             "DATA ADMIN",
+            "DATABASE ADMIN",
+            "EXPORT",
+            "IMPORT",
             "INIFILE ADMIN",
+            "LICENSE ADMIN",
             "LOG ADMIN",
+            "MONITOR ADMIN",
+            "PRIVILEGE ADMIN",
+            "RESOURCE ADMIN",
             "ROLE ADMIN",
             "SERVICE ADMIN",
+            "STRUCTURED PRIVILEGE ADMIN",
+            "TRACE ADMIN",
             "TRUST ADMIN",
             "USER ADMIN",
-            "BACKUP ADMIN",
+            "WORKLOAD CAPTURE ADMIN",
+            "WORKLOAD REPLAY ADMIN",
         ],
+        "privilege_rules": {
+            "flag_grant_option_on_critical": True,
+            "business_schema_patterns": ["SYS_BIC", "*HDI*", "HDI_*"],
+            "business_object_privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+            "exclude_schema_patterns": ["_SYS_*", "SYS", "SYSTEM"],
+        },
         "password_policy_defaults": {
             "minimal_password_length": 8,
             "force_first_password_change": "TRUE",
@@ -384,16 +410,19 @@ class AuditGUI:
         self.import_tab = QWidget()
         self.user_review_tab = QWidget()
         self.audit_tab = QWidget()
+        self.controls_catalog_tab = QWidget()
         self.settings_tab = QWidget()
 
         self.notebook.addTab(self.import_tab, "טעינת נתונים (IPE)")
         self.notebook.addTab(self.user_review_tab, "דוח סקירת משתמשים")
         self.notebook.addTab(self.audit_tab, "ניתוח וממצאים")
+        self.notebook.addTab(self.controls_catalog_tab, "רשימת בקרות לניתוח")
         self.notebook.addTab(self.settings_tab, "הגדרות מערכת")
 
         self._build_import_tab()
         self._build_user_review_tab()
         self._build_audit_tab()
+        self._build_controls_catalog_tab()
         self._build_settings_tab()
 
     def _rtl_hebrew_only(self, text):
@@ -652,6 +681,65 @@ class AuditGUI:
         layout.addWidget(results_box, 1)
 
         self._reset_filter_options()
+
+    def _build_controls_catalog_tab(self):
+        layout = QVBoxLayout(self.controls_catalog_tab)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        hint = QLabel(
+            "רשימת בקרות ITGC ל-SAP HANA DB (Phase 1 — placeholder). "
+            "בקרות אלו טרם מקושרות ל-validators; לפרטי מילוי ראו docs/CONTROLS_CATALOG_FILL_GUIDE.md"
+        )
+        hint.setWordWrap(True)
+        hint.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        hint.setStyleSheet("color: #444; font-size: 11px; padding: 4px 0;")
+        layout.addWidget(hint)
+
+        self.controls_catalog_table = QTableWidget()
+        self.controls_catalog_table.setLayoutDirection(Qt.RightToLeft)
+        headers = ["מזהה בקרה", "כותרת", "דומיין", "slots נדרשים", "סטטוס"]
+        self.controls_catalog_table.setColumnCount(len(headers))
+        self.controls_catalog_table.setHorizontalHeaderLabels(headers)
+        self.controls_catalog_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.controls_catalog_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.controls_catalog_table.setAlternatingRowColors(True)
+        hdr = self.controls_catalog_table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.Interactive)
+        hdr.setStretchLastSection(True)
+        self.controls_catalog_table.setColumnWidth(0, 220)
+        self.controls_catalog_table.setColumnWidth(1, 260)
+        self.controls_catalog_table.setColumnWidth(2, 120)
+        self.controls_catalog_table.setColumnWidth(3, 280)
+        self.controls_catalog_table.verticalHeader().setVisible(False)
+        layout.addWidget(self.controls_catalog_table, 1)
+
+        btn_bar = QHBoxLayout()
+        refresh_btn = QPushButton("רענון רשימה")
+        refresh_btn.clicked.connect(self._refresh_controls_catalog_table)
+        btn_bar.addWidget(refresh_btn)
+        btn_bar.addStretch(1)
+        layout.addLayout(btn_bar)
+
+        self._refresh_controls_catalog_table()
+
+    def _refresh_controls_catalog_table(self):
+        if not hasattr(self, "controls_catalog_table"):
+            return
+        rows = get_controls_catalog_summary()
+        self.controls_catalog_table.setRowCount(len(rows))
+        for row_idx, entry in enumerate(rows):
+            values = [
+                entry.get("control_id", ""),
+                self._rtl_hebrew_only(entry.get("title_he", "")),
+                entry.get("domain", ""),
+                entry.get("required_slots", ""),
+                entry.get("status", ""),
+            ]
+            for col_idx, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.controls_catalog_table.setItem(row_idx, col_idx, item)
 
     def _build_settings_tab(self):
         outer_layout = QVBoxLayout(self.settings_tab)
@@ -991,6 +1079,13 @@ class AuditGUI:
         return findings
 
     def _read_source_file(self, file_path):
+        if getattr(self, "use_src_reader", False):
+            result = read_hana_export(file_path)
+            if result.df is None:
+                reason = "; ".join(result.warnings) if result.warnings else "לא ניתן לקרוא את הקובץ"
+                raise ValueError(reason)
+            return result.df
+
         df = pd.read_csv(
             file_path,
             sep=None,

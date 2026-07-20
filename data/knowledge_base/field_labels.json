@@ -1,0 +1,50 @@
+{
+  "_schema_version": 1,
+  "_description": "תוויות עברית לעמודות יצוא HANA — Phase 1: עמודות מזוהות מקבצי samples",
+  "USERS": {
+    "USER_NAME": "שם משתמש",
+    "USER_ID": "מזהה משתמש",
+    "LAST_SUCCESSFUL_CONNECT": "התחברות מוצלחת אחרונה",
+    "USER_DEACTIVATED": "משתמש מושבת",
+    "IS_RESTRICTED": "מוגבל",
+    "IS_RESTRICTED_DETAILS": "פירוט הגבלה",
+    "LAST_PASSWORD_CHANGE_TIME": "שינוי סיסמה אחרון",
+    "INVALID_CONNECT_ATTEMPTS": "ניסיונות התחברות שגויים",
+    "IS_PASSWORD_ENABLED": "סיסמה מופעלת",
+    "CREATE_TIME": "תאריך יצירה",
+    "VALID_FROM": "תוקף מ-",
+    "VALID_UNTIL": "תוקף עד"
+  },
+  "GRANTED_PRIVILEGES": {
+    "GRANTEE": "מקבל ההרשאה",
+    "GRANTEE_TYPE": "סוג מקבל",
+    "PRIVILEGE": "הרשאה",
+    "OBJECT_TYPE": "סוג אובייקט",
+    "OBJECT_NAME": "שם אובייקט",
+    "SCHEMA_NAME": "סכימה",
+    "IS_GRANTABLE": "ניתן להענקה",
+    "IS_VALID": "תקף"
+  },
+  "GRANTED_ROLES": {
+    "GRANTEE": "מקבל התפקיד",
+    "GRANTEE_TYPE": "סוג מקבל",
+    "ROLE_NAME": "שם תפקיד",
+    "IS_GRANTABLE": "ניתן להענקה",
+    "IS_GRANTED_BY_LDAP": "הוענק דרך LDAP"
+  },
+  "AUDIT_POLICIES": {
+    "AUDIT_POLICY_NAME": "שם מדיניות ניטור",
+    "IS_AUDIT_POLICY_ACTIVE": "מדיניות פעילה"
+  },
+  "M_INIFILE_CONTENTS": {
+    "FILE_NAME": "שם קובץ INI",
+    "SECTION": "סקשן",
+    "KEY": "מפתח",
+    "VALUE": "ערך"
+  },
+  "M_PASSWORD_POLICY": {
+    "PROPERTY": "פרמטר",
+    "VALUE": "ערך"
+  },
+  "AUDIT_TRAIL": {}
+}

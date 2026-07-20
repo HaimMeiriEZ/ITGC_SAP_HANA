@@ -1,3 +1,4 @@
+import fnmatch
 import pandas as pd
 from typing import List, Dict, Any, Optional
 from DataClasses import Finding
@@ -154,6 +155,41 @@ class AuditAnalyzer:
         if isinstance(value, float) and pd.isna(value):
             return ""
         return str(value).strip().strip('"').upper()
+
+    def _get_privilege_rules(self) -> Dict[str, Any]:
+        defaults: Dict[str, Any] = {
+            "flag_grant_option_on_critical": True,
+            "business_schema_patterns": ["SYS_BIC", "*HDI*", "HDI_*"],
+            "business_object_privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+            "exclude_schema_patterns": ["_SYS_*", "SYS", "SYSTEM"],
+        }
+        rules = self.config.get("privilege_rules") or {}
+        merged = {**defaults, **rules}
+        return merged
+
+    def _is_grantable_true(self, value) -> bool:
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return False
+        return str(value).strip().upper() in {"TRUE", "1", "YES", "Y", "T"}
+
+    def _schema_matches_patterns(
+        self,
+        schema: str,
+        include_patterns: List[str],
+        exclude_patterns: List[str],
+    ) -> bool:
+        schema_upper = self._normalize_access_token(schema)
+        if not schema_upper or schema_upper == "?":
+            return False
+
+        for pattern in exclude_patterns:
+            if fnmatch.fnmatch(schema_upper, str(pattern).strip().upper()):
+                return False
+
+        for pattern in include_patterns:
+            if fnmatch.fnmatch(schema_upper, str(pattern).strip().upper()):
+                return True
+        return False
 
     def _build_role_privilege_lookup(self, df_privs: Optional[pd.DataFrame]) -> Dict[str, List[str]]:
         lookup: Dict[str, List[str]] = {}
@@ -367,6 +403,93 @@ class AuditAnalyzer:
                 category="Access",
                 title=f"הרשאה קריטית חריגה: {privilege} | משתמש: {grantee}",
                 description=description,
+                risk_level="High",
+                status=status,
+                source_slot="EFFECTIVE_PRIVILEGE_GRANTEES",
+            ))
+
+    def analyze_grant_option_violations(self, df_privs: pd.DataFrame, period_id: str):
+        """איתור ADMIN OPTION (IS_GRANTABLE) על הרשאות System קריטיות — כולל DBA."""
+        if df_privs is None or df_privs.empty:
+            return
+
+        grantee_col = self._get_first_existing_column(df_privs, ["GRANTEE", "GRANTEE_NAME", "USER_NAME", "USER"])
+        privilege_col = self._get_first_existing_column(df_privs, ["PRIVILEGE", "PRIVILEGE_TYPE", "OBJECT_PRIVILEGE"])
+        grantable_col = self._get_first_existing_column(df_privs, ["IS_GRANTABLE", "GRANTABLE", "WITH GRANT OPTION"])
+        if grantee_col is None or privilege_col is None or grantable_col is None:
+            return
+
+        critical_privs = {self._normalize_access_token(item) for item in self.config.get("critical_privileges", [])}
+
+        for _, row in df_privs.iterrows():
+            privilege = self._normalize_access_token(row.get(privilege_col))
+            if privilege not in critical_privs or not self._is_grantable_true(row.get(grantable_col)):
+                continue
+
+            grantee = str(row.get(grantee_col, "")).strip()
+            status = "Exception Approved" if self._is_whitelisted("Privilege", privilege) else "Non-Compliant"
+            self.findings.append(Finding(
+                period_id=period_id,
+                category="Access",
+                title=f"ADMIN OPTION על הרשאה קריטית: {privilege} | {grantee}",
+                description=(
+                    f"ההרשאה {privilege} הוקצתה ל-{grantee} עם אפשרות העברה (WITH GRANT OPTION / IS_GRANTABLE=TRUE). "
+                    "System Privileges קריטיות אמורות להיות ללא ADMIN OPTION."
+                ),
+                risk_level="High",
+                status=status,
+                source_slot="EFFECTIVE_PRIVILEGE_GRANTEES",
+            ))
+
+    def analyze_business_schema_privileges(self, df_privs: pd.DataFrame, period_id: str):
+        """איתור הרשאות DML על schemas עסקיים (SYS_BIC, HDI וכו') למשתמשים שאינם DBA."""
+        if df_privs is None or df_privs.empty:
+            return
+
+        grantee_col = self._get_first_existing_column(df_privs, ["GRANTEE", "GRANTEE_NAME", "USER_NAME", "USER"])
+        privilege_col = self._get_first_existing_column(df_privs, ["PRIVILEGE", "PRIVILEGE_TYPE", "OBJECT_PRIVILEGE"])
+        schema_col = self._get_first_existing_column(df_privs, ["SCHEMA_NAME", "SCHEMA", "OBJECT_SCHEMA"])
+        grantee_type_col = self._get_first_existing_column(df_privs, ["GRANTEE_TYPE", "OBJECT_TYPE"])
+        if grantee_col is None or privilege_col is None or schema_col is None:
+            return
+
+        rules = self._get_privilege_rules()
+        include_patterns = rules.get("business_schema_patterns") or []
+        exclude_patterns = rules.get("exclude_schema_patterns") or []
+        object_privileges = {
+            self._normalize_access_token(item)
+            for item in rules.get("business_object_privileges", [])
+        }
+        critical_users = {self._normalize_access_token(item) for item in self.config.get("critical_users", [])}
+
+        for _, row in df_privs.iterrows():
+            grantee = str(row.get(grantee_col, "")).strip()
+            normalized_grantee = self._normalize_access_token(grantee)
+            if not normalized_grantee or normalized_grantee in critical_users:
+                continue
+
+            if grantee_type_col is not None:
+                grantee_type = self._normalize_access_token(row.get(grantee_type_col))
+                if grantee_type and grantee_type not in {"USER"}:
+                    continue
+
+            privilege = self._normalize_access_token(row.get(privilege_col))
+            if privilege not in object_privileges:
+                continue
+
+            schema_name = str(row.get(schema_col, "")).strip()
+            if not self._schema_matches_patterns(schema_name, include_patterns, exclude_patterns):
+                continue
+
+            status = "Exception Approved" if self._is_whitelisted("Privilege", privilege) else "Non-Compliant"
+            self.findings.append(Finding(
+                period_id=period_id,
+                category="Access",
+                title=f"הרשאת {privilege} על schema עסקי {schema_name} | משתמש: {grantee}",
+                description=(
+                    f"למשתמש {grantee} הוקצתה הרשאת {privilege} על schema עסקי {schema_name}. "
+                    "הרשאות DML על schemas עסקיים אמורות להיות מוגבלות לחשבונות תהליך/מערכת בלבד."
+                ),
                 risk_level="High",
                 status=status,
                 source_slot="EFFECTIVE_PRIVILEGE_GRANTEES",
@@ -666,15 +789,19 @@ class AuditAnalyzer:
             
         if 'USERS' in data_frames:
             self.analyze_critical_users(data_frames['USERS'], period_id)
-            
-        if 'EFFECTIVE_PRIVILEGE_GRANTEES' in data_frames:
-            self.analyze_privileges(data_frames['EFFECTIVE_PRIVILEGE_GRANTEES'], period_id)
+
+        privilege_df = self._get_first_loaded_frame(data_frames, ['EFFECTIVE_PRIVILEGE_GRANTEES', 'GRANTED_PRIVILEGES'])
+        if privilege_df is not None:
+            self.analyze_privileges(privilege_df, period_id)
+            privilege_rules = self._get_privilege_rules()
+            if privilege_rules.get("flag_grant_option_on_critical", True):
+                self.analyze_grant_option_violations(privilege_df, period_id)
+            self.analyze_business_schema_privileges(privilege_df, period_id)
             
         if 'AUDIT_POLICIES' in data_frames:
             self.analyze_audit_policies(data_frames['AUDIT_POLICIES'], period_id)
 
         roles_df = self._get_first_loaded_frame(data_frames, ['GRANTED_ROLES', 'EFFECTIVE_ROLES', 'EFFECTIVE_ROLE_GRANTEES'])
-        privilege_df = self._get_first_loaded_frame(data_frames, ['EFFECTIVE_PRIVILEGE_GRANTEES', 'GRANTED_PRIVILEGES'])
         if roles_df is not None:
             self.analyze_role_assignments(roles_df, privilege_df, period_id)
         else:

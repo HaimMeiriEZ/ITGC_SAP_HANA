@@ -1,0 +1,19 @@
+{
+  "$comment": "תבנית תוויות עברית — מפתח ראשון = slot key, מפתח שני = שם עמודה באנגלית",
+  "USERS": {
+    "USER_NAME": "שם משתמש",
+    "LAST_SUCCESSFUL_CONNECT": "התחברות מוצלחת אחרונה"
+  },
+  "GRANTED_PRIVILEGES": {
+    "GRANTEE": "מקבל ההרשאה",
+    "PRIVILEGE": "הרשאה"
+  },
+  "GRANTED_ROLES": {
+    "GRANTEE": "מקבל התפקיד",
+    "ROLE_NAME": "שם תפקיד"
+  },
+  "AUDIT_POLICIES": {},
+  "M_INIFILE_CONTENTS": {},
+  "M_PASSWORD_POLICY": {},
+  "AUDIT_TRAIL": {}
+}
