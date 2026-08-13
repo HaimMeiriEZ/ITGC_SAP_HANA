@@ -1,0 +1,33 @@
+---
+description: Prevent Latin letters inside Hebrew words in user-facing Hebrew replies
+alwaysApply: true
+---
+
+# Hebrew script integrity
+
+Before sending any Hebrew reply, scan every Hebrew word (including text inside `[...]` tags).
+
+## Hard rule
+
+A Hebrew word may contain only Hebrew letters (U+05D0–U+05EA), niqqud, geresh/gershayim, and Hebrew punctuation. Never insert Latin letters (A–Z, a–z) inside a Hebrew word.
+
+English is allowed only as **whole tokens**: `USERS`, `SQL`, `CREATE_TIME`, `DB-AM-04`.
+
+## Required tags (copy exactly; all letters Hebrew)
+
+`[קליטה]` `[אוטו]` `[חצי]` `[ידני]`
+
+## Lookalikes — never substitute
+
+| Latin | Do not use instead of |
+|-------|------------------------|
+| o / O | ו (vav) |
+| i / I / l | י (yod) |
+| n | נ or ן |
+| c | ס |
+| p | פ or ף |
+| a | א |
+
+## Proofread before send
+
+If any Hebrew word contains a Latin letter, rewrite that word in Hebrew only, then send. Do not mention this check to the user.

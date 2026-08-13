@@ -8,7 +8,7 @@
 |------|--------|
 | `controls_catalog.json` | קטלוג בקרות — מזהים, כותרות, דומיין, slots נדרשים, סטטוס יישום |
 | `field_labels.json` | תוויות עברית לעמודות ביצואי HANA (לפי slot) |
-| `slot_definitions.json` | הגדרות slot: דפוסי שם קובץ, עמודות חובה/אופציונליות |
+| `slot_definitions.json` | הגדרות slot: דפוסי שם קובץ, עמודות חובה/אופציונליות (כולל EFFECTIVE_PRIVILEGE_GRANTEES ו-CONFIGURATION_PARAMETER_PROPERTIES) |
 | `_templates/` | תבניות JSON למילוי עתידי |
 
 ## מצב נוכחי (Phase 1)

@@ -1,0 +1,7 @@
+SECTION;KEY;HAS_KEY_INDEX;DESCRIPTION;DATA_TYPE_NAME;VALUE_LIST_SEP;DEFAULT_VALUE;RESTART_REQUIRED;INIFILE_NAMES;UNIT;VALUE_RESTRICTIONS;CUSTOM_RESTRICTIONS;LAYER_RESTRICTIONS;IS_READ_ONLY;IS_SYSTEM_MANAGED;IS_TEMPLATE
+auditing configuration;global_auditing_state;No;Enables or disables system-wide auditing features.;BOOLEAN;;FALSE;FALSE;global.ini;;{TRUE, FALSE};;SYSTEM;FALSE;FALSE;FALSE
+auditing configuration;default_audit_trail_type;No;Specifies the default audit trail target type (e.g. TABLE, SYSLOG, CSV).;STRING;;TABLE;FALSE;global.ini;;{TABLE, SYSLOG, CSV, SYSTEMDB};;SYSTEM;FALSE;FALSE;FALSE
+password policy;minimal_password_length;No;Defines the minimum number of characters required for user passwords.;INTEGER;;8;FALSE;indexserver.ini;Characters;[6, 64];;SYSTEM;FALSE;FALSE;FALSE
+password policy;password_lock_time;No;Defines the duration in minutes for which a user account remains locked.;INTEGER;;1440;FALSE;indexserver.ini;Minutes;[0, 525600];;SYSTEM;FALSE;FALSE;FALSE
+password policy;force_first_password_change;No;Determines whether a user must change password upon initial login.;BOOLEAN;;TRUE;FALSE;indexserver.ini;;{TRUE, FALSE};;SYSTEM;FALSE;FALSE;FALSE
+auditing configuration;default_audit_trail_path;No;Specifies the directory path where file-based audit logs are stored.;STRING;;$(DIR_INSTANCE)/trace;FALSE;global.ini;;;;SYSTEM;FALSE;FALSE;FALSE

@@ -20,6 +20,11 @@ def _build_test_app():
                 ("VALUE", "CONFIGURED_VALUE", "CURRENT_VALUE"),
             ],
         },
+        "CONFIGURATION_PARAMETER_PROPERTIES": {
+            "label": "מטא-דאטה פרמטרים",
+            "required": ["SECTION", "KEY", "DEFAULT_VALUE"],
+            "required_any": [],
+        },
     }
     return app
 
@@ -45,3 +50,21 @@ def test_ini_file_without_file_name_is_detected_for_ini_slot():
     compatible_slots = app._find_compatible_slots(df)
 
     assert "M_INIFILE_CONTENTS" in compatible_slots
+    assert "CONFIGURATION_PARAMETER_PROPERTIES" not in compatible_slots
+
+
+def test_configuration_parameter_properties_is_not_ini_slot():
+    app = _build_test_app()
+    df = pd.DataFrame([
+        {
+            "SECTION": "password policy",
+            "KEY": "minimal_password_length",
+            "DEFAULT_VALUE": "8",
+            "INIFILE_NAMES": "indexserver.ini",
+        }
+    ])
+
+    compatible_slots = app._find_compatible_slots(df)
+
+    assert "CONFIGURATION_PARAMETER_PROPERTIES" in compatible_slots
+    assert "M_INIFILE_CONTENTS" not in compatible_slots

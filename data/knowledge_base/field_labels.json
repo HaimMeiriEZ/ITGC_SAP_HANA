@@ -25,6 +25,28 @@
     "IS_GRANTABLE": "ניתן להענקה",
     "IS_VALID": "תקף"
   },
+  "EFFECTIVE_PRIVILEGE_GRANTEES": {
+    "GRANTEE": "מקבל ההרשאה",
+    "GRANTEE_TYPE": "סוג מקבל",
+    "GRANTOR": "מעניק",
+    "PRIVILEGE": "הרשאה",
+    "OBJECT_TYPE": "סוג אובייקט",
+    "OBJECT_NAME": "שם אובייקט",
+    "SCHEMA_NAME": "סכימה",
+    "COLUMN_NAME": "שם עמודה",
+    "IS_GRANTABLE": "ניתן להענקה",
+    "IS_VALID": "תקף"
+  },
+  "CONFIGURATION_PARAMETER_PROPERTIES": {
+    "SECTION": "סקשן",
+    "KEY": "מפתח",
+    "DESCRIPTION": "תיאור",
+    "DATA_TYPE_NAME": "סוג נתון",
+    "DEFAULT_VALUE": "ערך ברירת מחדל",
+    "INIFILE_NAMES": "קבצי INI",
+    "RESTART_REQUIRED": "נדרש אתחול",
+    "IS_READ_ONLY": "קריאה בלבד"
+  },
   "GRANTED_ROLES": {
     "GRANTEE": "מקבל התפקיד",
     "GRANTEE_TYPE": "סוג מקבל",

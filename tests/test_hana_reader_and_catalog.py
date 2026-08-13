@@ -31,6 +31,14 @@ SAMPLE_EXPECTATIONS = {
         "slot": "GRANTED_PRIVILEGES",
         "columns": ["GRANTEE", "PRIVILEGE", "OBJECT_TYPE", "IS_VALID"],
     },
+    "EFFECTIVE_PRIVILEGE_GRANTEES_sample.txt": {
+        "slot": "EFFECTIVE_PRIVILEGE_GRANTEES",
+        "columns": ["GRANTEE", "PRIVILEGE", "OBJECT_TYPE", "IS_GRANTABLE"],
+    },
+    "CONFIGURATION_PARAMETER_PROPERTIES_sample.txt": {
+        "slot": "CONFIGURATION_PARAMETER_PROPERTIES",
+        "columns": ["SECTION", "KEY", "DEFAULT_VALUE", "INIFILE_NAMES"],
+    },
     "GRANTED_ROLES_sample.txt": {
         "slot": "GRANTED_ROLES",
         "columns": ["GRANTEE", "ROLE_NAME", "GRANTEE_TYPE"],
@@ -73,11 +81,11 @@ def test_slot_detection_from_file(filename, expected):
     assert detect_slot_from_file(path) == expected["slot"]
 
 
-def test_catalog_has_nine_placeholder_controls():
+def test_catalog_has_eleven_placeholder_controls():
     controls = load_and_apply_catalog()
-    assert len(controls) == 9
+    assert len(controls) == 11
     placeholders = get_placeholder_controls()
-    assert len(placeholders) == 9
+    assert len(placeholders) == 11
 
 
 def test_all_placeholder_controls_not_implemented():
@@ -85,16 +93,18 @@ def test_all_placeholder_controls_not_implemented():
         assert is_control_implemented(control_id) is False
 
 
-def test_load_exports_from_samples_returns_six_frames():
+def test_load_exports_from_samples_returns_eight_frames():
     frames = load_exports()
-    assert len(frames) == 6
+    assert len(frames) == 8
     for slot in [
         "USERS",
         "GRANTED_PRIVILEGES",
+        "EFFECTIVE_PRIVILEGE_GRANTEES",
         "GRANTED_ROLES",
         "AUDIT_POLICIES",
         "M_INIFILE_CONTENTS",
         "M_PASSWORD_POLICY",
+        "CONFIGURATION_PARAMETER_PROPERTIES",
     ]:
         assert slot in frames
         assert not frames[slot].empty
@@ -107,13 +117,13 @@ def test_audit_trail_missing_from_samples():
 
 def test_validate_required_slots_for_audit_trail_control():
     frames = load_exports()
-    warnings = validate_required_slots_loaded(frames, "DB-AL-02_PLACEHOLDER")
+    warnings = validate_required_slots_loaded(frames, "DB-AL-01_PLACEHOLDER")
     assert any("AUDIT_TRAIL" in warning for warning in warnings)
 
 
 def test_controls_catalog_summary_for_ui():
     summary = get_controls_catalog_summary()
-    assert len(summary) == 9
+    assert len(summary) == 11
     assert all(row["status"] == "Placeholder — טרם יושם" for row in summary)
 
 
@@ -121,5 +131,5 @@ def test_catalog_merge_json_and_spec_rules():
     catalog = load_controls_catalog()
     assert "DB-AM-01_PLACEHOLDER" in catalog
     entry = catalog["DB-AM-01_PLACEHOLDER"]
-    assert entry.get("title_he") == "משתמשים קריטיים"
+    assert entry.get("title_he") == "סקירת המשתמשים"
     assert "USERS" in (entry.get("required_slots") or entry.get("required_tables") or [])

@@ -18,10 +18,17 @@
     },
     "GRANTED_PRIVILEGES": {
       "label_he": "הרשאות (GRANTED_PRIVILEGES)",
-      "filename_patterns": ["*priv*", "*PRIVILEGE*"],
+      "filename_patterns": ["*GRANTED_PRIV*", "*granted_priv*", "*privileges*"],
       "required_columns": ["GRANTEE", "PRIVILEGE"],
       "required_any_groups": [],
       "optional_columns": ["OBJECT_TYPE", "IS_VALID", "GRANTEE_TYPE"]
+    },
+    "EFFECTIVE_PRIVILEGE_GRANTEES": {
+      "label_he": "הרשאות אפקטיביות (EFFECTIVE_PRIVILEGE_GRANTEES)",
+      "filename_patterns": ["*EFFECTIVE_PRIVILEGE*", "*effective_privilege*", "*EFFECTIVE_PRIV*"],
+      "required_columns": ["GRANTEE", "PRIVILEGE", "OBJECT_TYPE"],
+      "required_any_groups": [],
+      "optional_columns": ["GRANTEE_TYPE", "GRANTOR", "SCHEMA_NAME", "OBJECT_NAME", "IS_GRANTABLE", "IS_VALID"]
     },
     "GRANTED_ROLES": {
       "label_he": "הקצאות תפקידים (GRANTED_ROLES)",
@@ -59,6 +66,13 @@
         ["VALUE", "CONFIGURED_VALUE", "CURRENT_VALUE"]
       ],
       "optional_columns": ["FILE_NAME"]
+    },
+    "CONFIGURATION_PARAMETER_PROPERTIES": {
+      "label_he": "מטא-דאטה פרמטרי תצורה (CONFIGURATION_PARAMETER_PROPERTIES)",
+      "filename_patterns": ["*CONFIGURATION_PARAMETER*", "*parameter_properties*", "*CONFIG_PARAM*"],
+      "required_columns": ["SECTION", "KEY", "DEFAULT_VALUE"],
+      "required_any_groups": [],
+      "optional_columns": ["DESCRIPTION", "DATA_TYPE_NAME", "INIFILE_NAMES", "RESTART_REQUIRED", "IS_READ_ONLY"]
     }
   }
 }

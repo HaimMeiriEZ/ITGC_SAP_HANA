@@ -87,10 +87,12 @@ class AuditGUI:
             "USERS": "users_export.csv",
             "M_PASSWORD_POLICY": "password_policy.csv",
             "GRANTED_PRIVILEGES": "privileges.csv",
+            "EFFECTIVE_PRIVILEGE_GRANTEES": "effective_privilege_grantees.csv",
             "GRANTED_ROLES": "granted_roles.csv",
             "AUDIT_POLICIES": "audit_policies.csv",
             "AUDIT_TRAIL": "audit_trail.csv",
             "M_INIFILE_CONTENTS": "m_inifile_contents.csv",
+            "CONFIGURATION_PARAMETER_PROPERTIES": "configuration_parameter_properties.csv",
         },
         "audit_event_keywords": [
             "CREATE USER",
@@ -247,6 +249,11 @@ class AuditGUI:
                 "required": ["GRANTEE", "PRIVILEGE"],
                 "required_any": [],
             },
+            "EFFECTIVE_PRIVILEGE_GRANTEES": {
+                "label": "הרשאות אפקטיביות (טבלת EFFECTIVE_PRIVILEGE_GRANTEES)",
+                "required": ["GRANTEE", "PRIVILEGE", "OBJECT_TYPE"],
+                "required_any": [],
+            },
             "GRANTED_ROLES": {
                 "label": "הקצאות תפקידים (טבלת GRANTED_ROLES)",
                 "required": [],
@@ -275,6 +282,11 @@ class AuditGUI:
                     ("KEY", "KEY_NAME", "PARAMETER_NAME", "PROPERTY"),
                     ("VALUE", "CONFIGURED_VALUE", "CURRENT_VALUE"),
                 ],
+            },
+            "CONFIGURATION_PARAMETER_PROPERTIES": {
+                "label": "מטא-דאטה פרמטרים (טבלת CONFIGURATION_PARAMETER_PROPERTIES)",
+                "required": ["SECTION", "KEY", "DEFAULT_VALUE"],
+                "required_any": [],
             },
         }
         
@@ -359,10 +371,12 @@ class AuditGUI:
             ("USERS", "משתמשים (טבלת USERS)", "מקור חובה: רשימת משתמשים ותאריכי התחברות אחרונים"),
             ("M_PASSWORD_POLICY", "מדיניות סיסמאות (טבלת M_PASSWORD_POLICY)", "מקור חובה: פרמטרים והגדרות אבטחת סיסמה"),
             ("GRANTED_PRIVILEGES", "הרשאות (טבלת GRANTED_PRIVILEGES)", "מקור חובה: מיפוי הרשאות מערכת למשתמשים"),
+            ("EFFECTIVE_PRIVILEGE_GRANTEES", "הרשאות אפקטיביות (טבלת EFFECTIVE_PRIVILEGE_GRANTEES)", "מקור מומלץ: הרשאות אפקטיביות כולל ירושה דרך roles"),
             ("GRANTED_ROLES", "הקצאות תפקידים (טבלת GRANTED_ROLES)", "מקור מומלץ: זיהוי הרשאות רגישות דרך Role inheritance"),
             ("AUDIT_POLICIES", "מדיניות ניטור (טבלת AUDIT_POLICIES)", "מקור חובה: הגדרות לוגים ובקרות ניטור מערכתיות"),
             ("AUDIT_TRAIL", "ראיות Audit בפועל (Audit Trail)", "מקור מומלץ: אימות פעולות מנהליות רגישות בפועל"),
             ("M_INIFILE_CONTENTS", "הקשחת תצורה (טבלת M_INIFILE_CONTENTS)", "מקור חובה: הגדרות קונפיגורציה קריטיות ברמת INI של SAP HANA"),
+            ("CONFIGURATION_PARAMETER_PROPERTIES", "מטא-דאטה פרמטרים (CONFIGURATION_PARAMETER_PROPERTIES)", "מקור מומלץ: ברירות מחדל, טיפוסים והגבלות לפרמטרי תצורה"),
         ]
 
         self.slot_status_vars = {}
@@ -505,7 +519,7 @@ class AuditGUI:
         self.loaded_files[slot_key] = filename
         self.loaded_extract_dates[slot_key] = extract_date
 
-        if slot_key == "GRANTED_PRIVILEGES":
+        if slot_key == "GRANTED_PRIVILEGES" and "EFFECTIVE_PRIVILEGE_GRANTEES" not in self.loaded_dataframes:
             self.loaded_dataframes["EFFECTIVE_PRIVILEGE_GRANTEES"] = df
             self.loaded_files["EFFECTIVE_PRIVILEGE_GRANTEES"] = filename
             self.loaded_extract_dates["EFFECTIVE_PRIVILEGE_GRANTEES"] = extract_date
@@ -617,9 +631,10 @@ class AuditGUI:
             self.loaded_extract_dates.pop(slot_key, None)
 
             if slot_key == "GRANTED_PRIVILEGES":
-                self.loaded_dataframes.pop("EFFECTIVE_PRIVILEGE_GRANTEES", None)
-                self.loaded_files.pop("EFFECTIVE_PRIVILEGE_GRANTEES", None)
-                self.loaded_extract_dates.pop("EFFECTIVE_PRIVILEGE_GRANTEES", None)
+                if self.loaded_files.get("EFFECTIVE_PRIVILEGE_GRANTEES") == filename:
+                    self.loaded_dataframes.pop("EFFECTIVE_PRIVILEGE_GRANTEES", None)
+                    self.loaded_files.pop("EFFECTIVE_PRIVILEGE_GRANTEES", None)
+                    self.loaded_extract_dates.pop("EFFECTIVE_PRIVILEGE_GRANTEES", None)
             elif slot_key == "GRANTED_ROLES":
                 self.loaded_dataframes.pop("EFFECTIVE_ROLES", None)
                 self.loaded_files.pop("EFFECTIVE_ROLES", None)

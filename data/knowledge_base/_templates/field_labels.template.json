@@ -8,6 +8,16 @@
     "GRANTEE": "מקבל ההרשאה",
     "PRIVILEGE": "הרשאה"
   },
+  "EFFECTIVE_PRIVILEGE_GRANTEES": {
+    "GRANTEE": "מקבל ההרשאה",
+    "PRIVILEGE": "הרשאה",
+    "OBJECT_TYPE": "סוג אובייקט"
+  },
+  "CONFIGURATION_PARAMETER_PROPERTIES": {
+    "SECTION": "סקשן",
+    "KEY": "מפתח",
+    "DEFAULT_VALUE": "ערך ברירת מחדל"
+  },
   "GRANTED_ROLES": {
     "GRANTEE": "מקבל התפקיד",
     "ROLE_NAME": "שם תפקיד"
