@@ -12,7 +12,7 @@
       "required_slots": [
         "USERS"
       ],
-      "implementation_status": "placeholder",
+      "implementation_status": "implemented",
       "validator_ref": "validate_user_population",
       "in_scope": true,
       "analysis_type": "USER_POPULATION_REVIEW",
@@ -31,7 +31,7 @@
       "required_slots": [
         "M_PASSWORD_POLICY"
       ],
-      "implementation_status": "placeholder",
+      "implementation_status": "implemented",
       "validator_ref": "validate_password_policy_baseline",
       "in_scope": true,
       "analysis_type": "PASSWORD_POLICY_BASELINE",
@@ -51,7 +51,7 @@
         "USERS",
         "EFFECTIVE_PRIVILEGE_GRANTEES"
       ],
-      "implementation_status": "placeholder",
+      "implementation_status": "implemented",
       "validator_ref": "validate_password_policy_exemptions",
       "in_scope": true,
       "analysis_type": "PASSWORD_POLICY_EXEMPTIONS",
@@ -72,7 +72,7 @@
         "AUDIT_POLICIES",
         "AUDIT_TRAIL"
       ],
-      "implementation_status": "placeholder",
+      "implementation_status": "implemented",
       "validator_ref": "validate_audit_policy_enabled",
       "in_scope": true,
       "analysis_type": "AUDIT_POLICY_ENABLED",
@@ -93,7 +93,7 @@
         "GRANTED_ROLES",
         "EFFECTIVE_PRIVILEGE_GRANTEES"
       ],
-      "implementation_status": "placeholder",
+      "implementation_status": "implemented",
       "validator_ref": "validate_user_provisioning",
       "in_scope": true,
       "analysis_type": "USER_PROVISIONING",
@@ -113,15 +113,15 @@
         "USERS",
         "EFFECTIVE_PRIVILEGE_GRANTEES"
       ],
-      "implementation_status": "placeholder",
+      "implementation_status": "implemented",
       "validator_ref": "validate_builtin_users_lockdown",
       "in_scope": true,
       "analysis_type": "BUILTIN_USERS_LOCKDOWN",
-      "description": "משתמשים built in שנוצרו עם המערכת נעולים או סיסמתם שונתה, משתמשים כדלקמן:\nSYSTEM\n_SYS_REPO\n_SYS_STATISTICS\n_SYS_TASK \nSYS_XB\nSYS_SQL_ANALYZER\nSYS_WORKLOAD_REPLAY",
+      "description": "משתמשים built in שנוצרו עם המערכת נעולים או סיסמתם שונתה, משתמשים כדלקמן:\nSYSTEM\n_SYS_REPO\n_SYS_STATISTICS\n_SYS_TASK\n_SYS_XB\n_SYS_SQL_ANALYZER\n_SYS_WORKLOAD_REPLAY",
       "process": "ניהול גישה — סקירת משתמשים גנריים",
       "risk_description": "סיסמת ברירת המחדל של משתמשים שהגיעו עם המערכת לא הוחלפה ועלולה להיות נגישה למשתמשים לא מורשים לפעולות לא הולמות",
       "test_steps_override": "1. [קליטה] טעינת:\n   - USERS (חובה: USER_NAME, USER_DEACTIVATED; מומלץ: ADMIN_GIVEN_PASSWORD, LAST_PASSWORD_CHANGE_TIME)\n   - EFFECTIVE_PRIVILEGE_GRANTEES (לבדיקת CONNECT לצעד 5)\n\n2. [אוטו] התאמה לרשימת builtin_users בהגדרות (טאב \"הגדרות מערכת\"):\n   SYSTEM, _SYS_REPO, _SYS_STATISTICS, _SYS_TASK, _SYS_XB, _SYS_SQL_ANALYZER, _SYS_WORKLOAD_REPLAY\n   (+ הרחבה לפי סביבה). וידוא שכל שם מהרשימה קיים ב-USERS.\n\n3. [אוטו] נעילה / השבתה:\n   לכל משתמש ברשימה — USER_DEACTIVATED = TRUE (= מושבת/נעול).\n   ממצא אם משתמש פעיל (USER_DEACTIVATED = FALSE) וגם סיסמת ברירת מחדל (ראה צעד 4).\n\n4. [אוטו]/[חצי] שינוי סיסמה מברירת מחדל:\n   [אוטו] ADMIN_GIVEN_PASSWORD = FALSE (= סיסמה שונתה);\n   [חצי] אם TRUE — בקשת תיעוד/לוג שהסיסמה הוחלפה או שהמשתמש הושבת.\n\n   כלל עמידה: תקין אם USER_DEACTIVATED = TRUE **או** ADMIN_GIVEN_PASSWORD = FALSE.\n\n5. [חצי] הרשאות CONNECT (מידע משלים):\n   EFFECTIVE_PRIVILEGE_GRANTEES\n   WHERE OBJECT_TYPE = 'SYSTEMPRIVILEGE' AND PRIVILEGE = 'CONNECT'\n     AND GRANTEE IN (<רשימת builtin_users>)\n   הצגה לסוקר — CONNECT לבד אינו ממצא אם המשתמש מושבת.\n\n6. [ידני] אימות התחברות (סביבת טסט בלבד) — משתמשים מושבתים אינם ניתנים לשימוש.\n\n7. [ידני] סקירה תקופתית (חצי/שנתית) + תיעוד/חתימת InfoSec.",
-      "notes": "להוסיף רשימה נפרדת, או להשתמש זמנית ב-critical_users"
+      "notes": "רשימת builtin_users ב-settings.json; critical_users למעקב התחברות נפרד."
     },
     {
       "control_id": "DB-AM-03_PLACEHOLDER",
@@ -132,7 +132,7 @@
       "required_slots": [
         "USERS"
       ],
-      "implementation_status": "placeholder",
+      "implementation_status": "implemented",
       "validator_ref": "validate_system_user_lockdown",
       "in_scope": true,
       "analysis_type": "SYSTEM_USER_LOCKDOWN",
@@ -153,7 +153,7 @@
         "EFFECTIVE_PRIVILEGE_GRANTEES",
         "GRANTED_ROLES"
       ],
-      "implementation_status": "placeholder",
+      "implementation_status": "implemented",
       "validator_ref": "validate_critical_privileges",
       "in_scope": true,
       "analysis_type": "CRITICAL_PRIVILEGES",
@@ -173,7 +173,7 @@
         "USERS",
         "GRANTED_PRIVILEGES"
       ],
-      "implementation_status": "placeholder",
+      "implementation_status": "implemented",
       "validator_ref": "validate_periodic_uar",
       "in_scope": true,
       "analysis_type": "PERIODIC_UAR",
@@ -192,7 +192,7 @@
       "required_slots": [
         "EFFECTIVE_PRIVILEGE_GRANTEES"
       ],
-      "implementation_status": "placeholder",
+      "implementation_status": "implemented",
       "validator_ref": "validate_analytic_object_access",
       "in_scope": true,
       "analysis_type": "ANALYTIC_OBJECT_ACCESS",
@@ -211,7 +211,7 @@
       "required_slots": [
         "EFFECTIVE_PRIVILEGE_GRANTEES"
       ],
-      "implementation_status": "placeholder",
+      "implementation_status": "implemented",
       "validator_ref": "validate_system_table_access",
       "in_scope": true,
       "analysis_type": "SYSTEM_TABLE_ACCESS",

@@ -37,6 +37,8 @@ class Finding:
     comparison_rule: Optional[str] = None
     remediation_owner: Optional[str] = None
     evidence_ref: Optional[str] = None
+    control_id: Optional[str] = None
+    analysis_type: Optional[str] = None
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
 @dataclass

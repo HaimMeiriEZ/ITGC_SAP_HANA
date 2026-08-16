@@ -81,16 +81,16 @@ def test_slot_detection_from_file(filename, expected):
     assert detect_slot_from_file(path) == expected["slot"]
 
 
-def test_catalog_has_eleven_placeholder_controls():
+def test_catalog_has_eleven_controls_all_implemented():
     controls = load_and_apply_catalog()
     assert len(controls) == 11
     placeholders = get_placeholder_controls()
-    assert len(placeholders) == 11
+    assert len(placeholders) == 0
 
 
-def test_all_placeholder_controls_not_implemented():
+def test_all_controls_marked_implemented():
     for control_id in AUDIT_CONTROL_DEFINITIONS:
-        assert is_control_implemented(control_id) is False
+        assert is_control_implemented(control_id) is True
 
 
 def test_load_exports_from_samples_returns_eight_frames():
@@ -124,7 +124,7 @@ def test_validate_required_slots_for_audit_trail_control():
 def test_controls_catalog_summary_for_ui():
     summary = get_controls_catalog_summary()
     assert len(summary) == 11
-    assert all(row["status"] == "Placeholder — טרם יושם" for row in summary)
+    assert all(row["status"] == "Implemented" for row in summary)
 
 
 def test_catalog_merge_json_and_spec_rules():

@@ -12,13 +12,14 @@ if sys.platform != "win32" and not os.environ.get("DISPLAY"):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QDate, Qt
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QDateEdit,
     QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QGridLayout,
@@ -29,9 +30,12 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSizePolicy,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -52,18 +56,174 @@ try:
     from DataClasses import Finding
     from DatabaseManager import DatabaseManager
     from core.importer import DataImporter
-    from core.analyzer import AuditAnalyzer
     from core.support_logger import SupportLogger
     from core.user_review import (
+        REVIEW_COMPLETION_COMPARISON_RULE,
+        build_review_completion_finding,
         build_user_review_report,
+        compute_review_progress,
         export_user_review_to_excel,
         export_user_review_to_pdf,
+        import_user_review_from_excel,
     )
-    from src.pipeline import get_controls_catalog_summary
+    from core.findings_master_detail import (
+        aggregate_findings_by_control,
+        build_summary_row_values,
+        details_by_control,
+        ensure_finding_control_id,
+        sorted_summary_rows,
+    )
+    from core.ipe_evidence import (
+        IpeEvidenceRepository,
+        collect_missing_ipe_slots,
+        controls_for_slot,
+        primary_slot_for_control,
+    )
+    from src.reporting.working_paper_report import safe_working_paper_filename, write_control_working_paper
+    from src.persistence.controls_catalog_loader import load_controls_catalog
+    from src.pipeline import get_controls_catalog_summary, run_audit_analysis
     from src.readers.hana_export_reader import read_hana_export
 except ImportError as e:
     print(f"שגיאת ייבוא: וודא שכל הקבצים נמצאים בנתיב הנכון. פירוט: {e}")
     raise
+
+
+class SortableTableWidgetItem(QTableWidgetItem):
+    SORT_ROLE = Qt.UserRole + 2
+    DF_INDEX_ROLE = Qt.UserRole
+
+    def __lt__(self, other: object) -> bool:
+        if isinstance(other, QTableWidgetItem):
+            self_sort_value = self.data(self.SORT_ROLE)
+            other_sort_value = other.data(self.SORT_ROLE)
+            if self_sort_value is not None or other_sort_value is not None:
+                left = "" if self_sort_value is None else str(self_sort_value)
+                right = "" if other_sort_value is None else str(other_sort_value)
+                return left < right
+            return super().__lt__(other)
+        return NotImplemented
+
+
+class UserReviewRowDialog(QDialog):
+    """Read-only detail view for a single user-review row."""
+
+    def __init__(self, parent=None, *, row: dict):
+        super().__init__(parent)
+        self.setWindowTitle("פרטי רשומת סקירת משתמשים")
+        self.setLayoutDirection(Qt.RightToLeft)
+        self.setMinimumWidth(560)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"משתמש: {row.get('user_name', '-')}"))
+
+        hint = QLabel("החלטות סקירה מתעדכנות רק באמצעות ייבוא קובץ Excel לאחר הסקירה.")
+        hint.setWordWrap(True)
+        hint.setProperty("class", "hint")
+        layout.addWidget(hint)
+
+        form = QFormLayout()
+        fields = [
+            ("סטטוס", row.get("active_status", "-")),
+            ("סוג משתמש", row.get("user_type", "-")),
+            ("החרגת סיסמה", row.get("password_policy_exempt_status", "-")),
+            ("סיבת החרגה", row.get("password_policy_exempt_reason", "-")),
+            ("גישה לטבלאות מערכת", row.get("system_table_access_status", "-")),
+            ("חריג", row.get("has_exception", "-")),
+            ("סיבת חריג", row.get("exception_reason", "-")),
+            ("סטטוס סקירה", row.get("review_status", "-")),
+            ("החלטת מנהל", row.get("manager_decision", "-") or "-"),
+            ("נדרש להסרה / מאושר להשאיר", row.get("action_required", "-") or "-"),
+            ("הערות", row.get("manager_comments", "-") or "-"),
+        ]
+        for label_text, value in fields:
+            value_label = QLabel("" if value is None else str(value))
+            value_label.setWordWrap(True)
+            value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            form.addRow(label_text, value_label)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox()
+        buttons.addButton("סגור", QDialogButtonBox.RejectRole)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
+class ImportReviewConfirmDialog(QDialog):
+    """Confirmation before applying an imported user-review Excel file."""
+
+    MODE_ALL = "all"
+    MODE_PRESERVE_NOTES = "preserve_notes"
+
+    def __init__(
+        self,
+        parent=None,
+        *,
+        total_in_file: int,
+        matched: int,
+        unmatched: list[str],
+        notes_cleared: list[str],
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("אישור ייבוא סקירת משתמשים")
+        self.setLayoutDirection(Qt.RightToLeft)
+        self.setMinimumWidth(520)
+        self._mode = self.MODE_ALL
+
+        layout = QVBoxLayout(self)
+        summary = QLabel(
+            f"נמצאו <b>{total_in_file}</b> רשומות בקובץ. "
+            f"יתאימו לדוח הנוכחי: <b>{matched}</b>."
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        has_issues = bool(unmatched or notes_cleared)
+        self._radio_all = None
+        self._radio_preserve = None
+        if has_issues:
+            warn_box = QGroupBox("התראות")
+            warn_layout = QVBoxLayout(warn_box)
+            if unmatched:
+                warn_layout.addWidget(
+                    QLabel(
+                        f"{len(unmatched)} משתמשים בקובץ אינם בדוח הנוכחי (ידולגו): "
+                        + ", ".join(unmatched[:8])
+                        + ("..." if len(unmatched) > 8 else "")
+                    )
+                )
+            if notes_cleared:
+                warn_layout.addWidget(
+                    QLabel(
+                        f"{len(notes_cleared)} רשומות עם הערות קיימות יתרוקנו אם תבחר 'כל השינויים'."
+                    )
+                )
+            layout.addWidget(warn_box)
+            layout.addWidget(QLabel("כיצד ברצונך להמשיך?"))
+            self._radio_all = QRadioButton("המשך עם כל השינויים (הערות ריקות בקובץ יימחקו)")
+            self._radio_all.setChecked(True)
+            self._radio_preserve = QRadioButton(
+                "המשך ושמור הערות קיימות (הערות לא יימחקו אם הקובץ ריק בשדה זה)"
+            )
+            layout.addWidget(self._radio_all)
+            layout.addWidget(self._radio_preserve)
+
+        buttons = QDialogButtonBox()
+        buttons.addButton("אשר ייבוא", QDialogButtonBox.AcceptRole)
+        buttons.addButton("ביטול", QDialogButtonBox.RejectRole)
+        buttons.accepted.connect(self._on_confirm)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_confirm(self):
+        if self._radio_preserve is not None and self._radio_preserve.isChecked():
+            self._mode = self.MODE_PRESERVE_NOTES
+        else:
+            self._mode = self.MODE_ALL
+        self.accept()
+
+    @property
+    def selected_mode(self) -> str:
+        return self._mode
 
 
 class SimpleVar:
@@ -125,7 +285,7 @@ class AuditGUI:
             "last_used_passwords": 5,
             "maximum_invalid_connect_attempts": 6,
             "minimal_password_lifetime": 1,
-            "maximum_password_lifetime": 182,
+            "maximum_password_lifetime": 90,
             "maximum_unused_initial_password_lifetime": 7,
             "maximum_unused_productive_password_lifetime": 365,
             "password_expire_warning_time": 14,
@@ -295,8 +455,22 @@ class AuditGUI:
         self.loaded_files = {}
         self.loaded_extract_dates = {}
         self.ipe_records = []
+        self.ipe_evidence_repo = IpeEvidenceRepository(
+            output_dir=PROJECT_ROOT / "data" / "output",
+            base_dir=PROJECT_ROOT,
+        )
+        self.ipe_evidence_data = self.ipe_evidence_repo.load()
+        self.slot_ipe_buttons = {}
+        self.slot_ipe_thumb_layouts = {}
+        self.slot_group_boxes = {}
+        self.control_to_slot_key = {}
+        self.control_to_slot_rows = {}
         self.current_findings = []
         self.displayed_findings = []
+        self.findings_summary_records = {}
+        self.findings_details_by_control = {}
+        self.selected_finding_control_id = None
+        self._suppress_findings_selection = False
         self.user_review_report = None
         self.user_review_df = pd.DataFrame()
         self.selected_user_review_index = None
@@ -477,6 +651,7 @@ class AuditGUI:
         self.slot_delete_btns = {}
         for slot_key, label, desc in slots:
             box = QGroupBox(label)
+            self.slot_group_boxes[slot_key] = box
             box_layout = QVBoxLayout(box)
             box_layout.setContentsMargins(12, 12, 12, 12)
             box_layout.setSpacing(8)
@@ -488,6 +663,13 @@ class AuditGUI:
             choose_btn.setMinimumSize(110, 32)
             choose_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             choose_btn.clicked.connect(lambda _checked=False, sk=slot_key: self._load_file(sk))
+
+            ipe_btn = QPushButton("ראיה (IPE)")
+            ipe_btn.setMinimumSize(110, 32)
+            ipe_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            ipe_btn.setToolTip("צרף תמונת מסך כראיית שליפה אותנטית (IPE)")
+            ipe_btn.clicked.connect(lambda _checked=False, sk=slot_key: self._add_ipe_evidence(sk))
+            self.slot_ipe_buttons[slot_key] = ipe_btn
 
             delete_btn = QPushButton("מחיקה")
             delete_btn.setMinimumSize(80, 32)
@@ -510,6 +692,7 @@ class AuditGUI:
             self.slot_extract_date_vars[slot_key] = SimpleVar(self._get_today_date())
 
             controls_layout.addWidget(delete_btn, 0, Qt.AlignRight)
+            controls_layout.addWidget(ipe_btn, 0, Qt.AlignRight)
             controls_layout.addWidget(choose_btn, 0, Qt.AlignRight)
             controls_layout.addWidget(date_label, 0, Qt.AlignRight)
             controls_layout.addWidget(date_edit, 0, Qt.AlignRight)
@@ -529,11 +712,21 @@ class AuditGUI:
             self.slot_status_labels[slot_key] = status_label
             box_layout.addWidget(status_label)
 
+            thumbs = QWidget()
+            thumbs_layout = QHBoxLayout(thumbs)
+            thumbs_layout.setContentsMargins(0, 0, 0, 0)
+            thumbs_layout.setSpacing(6)
+            thumbs_layout.addStretch(1)
+            self.slot_ipe_thumb_layouts[slot_key] = thumbs_layout
+            box_layout.addWidget(thumbs)
+
             layout.addWidget(box)
+            self._refresh_slot_ipe_thumbnails(slot_key)
+            self._update_slot_ipe_indicator(slot_key)
 
         ipe_box = QGroupBox("תיעוד דגימות (IPE Artifacts)")
         ipe_layout = QVBoxLayout(ipe_box)
-        cols = ["סלוט", "שם קובץ", "תאריך הפקה", "שורות", "זמן טעינה"]
+        cols = ["סלוט", "שם קובץ", "תאריך הפקה", "שורות", "ראיות IPE", "זמן טעינה"]
         self.ipe_tree = QTableWidget(0, len(cols))
         self.ipe_tree.setHorizontalHeaderLabels(cols)
         self._configure_table(self.ipe_tree)
@@ -553,10 +746,8 @@ class AuditGUI:
         self.export_review_pdf_btn.clicked.connect(self._export_user_review_pdf)
         self.export_review_excel_btn = QPushButton("ייצוא לאקסל")
         self.export_review_excel_btn.clicked.connect(self._export_user_review_excel)
-        self.save_review_btn = QPushButton("שמור כל השינויים")
-        self.save_review_btn.clicked.connect(self._save_all_user_review_changes)
-        self.edit_review_btn = QPushButton("עדכן החלטת מנהל")
-        self.edit_review_btn.clicked.connect(self._open_user_review_editor)
+        self.import_review_excel_btn = QPushButton("ייבוא סקירה מאקסל")
+        self.import_review_excel_btn.clicked.connect(self._import_user_review_excel)
         self.generate_review_btn = QPushButton("בנה דוח סקירה")
         self.generate_review_btn.clicked.connect(self._generate_user_review)
 
@@ -570,7 +761,14 @@ class AuditGUI:
         self.review_date_var = SimpleVar(self._get_today_date())
         self.review_date_widget.dateChanged.connect(lambda value: self.review_date_var.set(value.toPython().isoformat()))
 
-        for widget in [self.export_review_pdf_btn, self.export_review_excel_btn, self.save_review_btn, self.edit_review_btn, self.generate_review_btn, QLabel("תאריך סקירה:"), self.review_date_widget]:
+        for widget in [
+            self.export_review_pdf_btn,
+            self.export_review_excel_btn,
+            self.import_review_excel_btn,
+            self.generate_review_btn,
+            QLabel("תאריך סקירה:"),
+            self.review_date_widget,
+        ]:
             header_layout.addWidget(widget)
         header_layout.addStretch(1)
         header_layout.addWidget(title)
@@ -589,6 +787,41 @@ class AuditGUI:
             filter_layout.addWidget(checkbox)
         filter_layout.addStretch(1)
         layout.addLayout(filter_layout)
+
+        progress_box = QGroupBox("סיכום התקדמות סקירה")
+        progress_layout = QVBoxLayout(progress_box)
+        counts_row = QHBoxLayout()
+        self.user_review_total_label = QLabel('סה"כ משתמשים בדוח: 0')
+        self.user_review_total_label.setStyleSheet("font-weight: bold;")
+        self.user_review_reviewed_label = QLabel("משתמשים שנסקרו: 0")
+        self.user_review_reviewed_label.setStyleSheet("font-weight: bold; color: #2e7d32;")
+        self.user_review_unreviewed_label = QLabel("משתמשים שטרם נסקרו: 0")
+        self.user_review_unreviewed_label.setStyleSheet("font-weight: bold; color: #1565c0;")
+        for label in (
+            self.user_review_total_label,
+            self.user_review_reviewed_label,
+            self.user_review_unreviewed_label,
+        ):
+            counts_row.addWidget(label)
+        counts_row.addStretch(1)
+        progress_layout.addLayout(counts_row)
+
+        self.user_review_progress_bar = QProgressBar()
+        self.user_review_progress_bar.setMinimum(0)
+        self.user_review_progress_bar.setMaximum(100)
+        self.user_review_progress_bar.setValue(0)
+        self.user_review_progress_bar.setTextVisible(True)
+        self.user_review_progress_bar.setFormat("0%")
+        self.user_review_progress_bar.setStyleSheet(
+            "QProgressBar { border: 1px solid #90caf9; border-radius: 4px; text-align: center; height: 18px; }"
+            "QProgressBar::chunk { background-color: #42a5f5; }"
+        )
+        progress_layout.addWidget(self.user_review_progress_bar)
+
+        self.user_review_progress_percent_label = QLabel("התקדמות השלמת סקירה: 0%")
+        self.user_review_progress_percent_label.setStyleSheet("font-weight: bold; color: #0d47a1;")
+        progress_layout.addWidget(self.user_review_progress_percent_label)
+        layout.addWidget(progress_box)
 
         info_box = QGroupBox("מטא-דאטה ותקציר")
         info_layout = QVBoxLayout(info_box)
@@ -636,8 +869,9 @@ class AuditGUI:
         self.user_review_tree = QTableWidget(0, len(headers))
         self.user_review_tree.setHorizontalHeaderLabels(headers)
         self._configure_table(self.user_review_tree)
-        self.user_review_tree.cellDoubleClicked.connect(lambda _row, _col: self._open_user_review_editor())
+        self.user_review_tree.setSortingEnabled(True)
         self.user_review_tree.itemSelectionChanged.connect(self._handle_user_review_selection)
+        self.user_review_tree.cellDoubleClicked.connect(self._on_user_review_double_clicked)
         report_layout.addWidget(self.user_review_tree)
         layout.addWidget(report_box, 1)
 
@@ -682,17 +916,63 @@ class AuditGUI:
         filter_layout.addStretch(1)
         layout.addWidget(filter_box)
 
-        results_box = QGroupBox("ממצאי הביקורת")
-        results_layout = QVBoxLayout(results_box)
+        splitter = QSplitter(Qt.Vertical)
+
+        summary_box = QGroupBox("ממצאי ביקורת כללי - ריכוז")
+        summary_layout = QVBoxLayout(summary_box)
+        self.findings_summary_columns = [
+            "control_id",
+            "title_he",
+            "check_type",
+            "risk_level",
+            "valid_records",
+            "finding_records",
+            "total_records",
+            "working_paper",
+            "source_file",
+            "extraction_date",
+            "description",
+        ]
+        summary_headers = [
+            "מזהה בקרה",
+            "כותרת בקרה",
+            "סוג בדיקה",
+            "רמת סיכון",
+            "רשומות תקינות",
+            "רשומות עם ממצא",
+            'סה"כ רשומות',
+            "צור נייר עבודה",
+            "קובץ מקור",
+            "תאריך הפקה",
+            "תיאור בדיקה",
+        ]
+        self.findings_summary_table = QTableWidget(0, len(summary_headers))
+        self.findings_summary_table.setHorizontalHeaderLabels(summary_headers)
+        self._configure_table(self.findings_summary_table)
+        self.findings_summary_table.setSortingEnabled(True)
+        self.findings_summary_table.itemSelectionChanged.connect(self._refresh_selected_finding_detail)
+        summary_layout.addWidget(self.findings_summary_table)
+        splitter.addWidget(summary_box)
+
+        detail_box = QGroupBox("פירוט ממצאי ביקורת")
+        detail_layout = QVBoxLayout(detail_box)
         self.findings_column_order = ["source", "extract_date", "cat", "risk", "title", "rule", "actual", "expected", "status"]
-        headers = ["קובץ מקור", "תאריך הפקה", "קטגוריה", "סיכון", "תיאור", "סוג בדיקה", "ערך בפועל", "ערך מצופה", "סטטוס"]
-        self.tree = QTableWidget(0, len(headers))
-        self.tree.setHorizontalHeaderLabels(headers)
-        self._configure_table(self.tree)
-        self.tree.cellDoubleClicked.connect(lambda _row, _col: self._open_finding_details())
-        self.tree.horizontalHeader().sectionClicked.connect(self._on_findings_header_clicked)
-        results_layout.addWidget(self.tree)
-        layout.addWidget(results_box, 1)
+        detail_headers = ["קובץ מקור", "תאריך הפקה", "קטגוריה", "סיכון", "תיאור", "סוג בדיקה", "ערך בפועל", "ערך מצופה", "סטטוס"]
+        self.findings_detail_table = QTableWidget(0, len(detail_headers))
+        self.findings_detail_table.setHorizontalHeaderLabels(detail_headers)
+        self._configure_table(self.findings_detail_table)
+        self.findings_detail_table.setSortingEnabled(True)
+        self.findings_detail_table.cellDoubleClicked.connect(lambda _row, _col: self._open_finding_details())
+        self.findings_detail_table.horizontalHeader().sectionClicked.connect(self._on_findings_header_clicked)
+        detail_layout.addWidget(self.findings_detail_table)
+        splitter.addWidget(detail_box)
+
+        # Keep legacy alias used by older helpers that still reference self.tree
+        self.tree = self.findings_detail_table
+
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+        layout.addWidget(splitter, 1)
 
         self._reset_filter_options()
 
@@ -702,8 +982,7 @@ class AuditGUI:
         layout.setSpacing(8)
 
         hint = QLabel(
-            "רשימת בקרות ITGC ל-SAP HANA DB (Phase 1 — placeholder). "
-            "בקרות אלו טרם מקושרות ל-validators; לפרטי מילוי ראו docs/CONTROLS_CATALOG_FILL_GUIDE.md"
+            "כל 11 הבקרות מחוברות ל-validators לפי הקטלוג."
         )
         hint.setWordWrap(True)
         hint.setAlignment(Qt.AlignRight | Qt.AlignTop)
@@ -1173,12 +1452,17 @@ class AuditGUI:
 
         rows = len(df)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        evidence_count = len(self.ipe_evidence_data.get(slot_key, []))
+        evidence_names = ", ".join(
+            entry.get("original_filename", "") for entry in self.ipe_evidence_data.get(slot_key, [])
+        ) or "-"
         self.ipe_records.append(
             {
                 "סלוט במערכת": slot_key,
                 "שם קובץ מקורי": filename,
                 "תאריך הפקה": extract_date,
                 "כמות רשומות": rows,
+                "ראיות IPE": f"{evidence_count}: {evidence_names}",
                 "זמן טעינה": timestamp,
                 "נתיב מלא": file_path,
             }
@@ -1186,8 +1470,13 @@ class AuditGUI:
         self.db.save_ipe_load(slot_key, filename, extract_date, rows, file_path)
         self.slot_status_labels[slot_key].setText(f"✅ נטען: {filename}")
         self.slot_delete_btns[slot_key].setEnabled(True)
-        self._set_table_row(self.ipe_tree, self.ipe_tree.rowCount(), [slot_key, filename, extract_date, rows, timestamp])
+        self._set_table_row(
+            self.ipe_tree,
+            self.ipe_tree.rowCount(),
+            [slot_key, filename, extract_date, rows, evidence_count, timestamp],
+        )
         self.db.log_activity("IPE Load", f"Slot: {slot_key}, File: {filename}, Extract Date: {extract_date}, Rows: {rows}", "User")
+        self._update_slot_ipe_indicator(slot_key)
 
     def _validate_all_sources_before_analysis(self):
         required_slots = ["USERS", "M_PASSWORD_POLICY", "GRANTED_PRIVILEGES", "AUDIT_POLICIES", "M_INIFILE_CONTENTS"]
@@ -1204,9 +1493,25 @@ class AuditGUI:
                 file_name = self.loaded_files.get(slot_key, "קובץ לא מזוהה")
                 validation_errors.append(self._format_validation_message(slot_key, file_name, missing_columns, alternative_groups))
 
+        ipe_errors = self._missing_ipe_messages(list(self.loaded_dataframes.keys()))
+        if ipe_errors:
+            validation_errors.extend(ipe_errors)
+
         if validation_errors:
             return False, "\n\n--------------------\n\n".join(validation_errors)
         return True, ""
+
+    def _missing_ipe_messages(self, slot_keys):
+        labels = {
+            key: meta.get("label", key)
+            for key, meta in self.slot_metadata.items()
+        }
+        return collect_missing_ipe_slots(
+            list(slot_keys),
+            self.ipe_evidence_data,
+            loaded_files=self.loaded_files,
+            slot_labels=labels,
+        )
 
     def _load_file(self, slot_key):
         extract_date = self._normalize_extract_date(slot_key, show_message=True)
@@ -1281,8 +1586,87 @@ class AuditGUI:
 
             self.slot_status_labels[slot_key].setText("ממתין לטעינה...")
             self.slot_delete_btns[slot_key].setEnabled(False)
+            self.ipe_evidence_repo.clear_slot(slot_key, self.ipe_evidence_data)
+            self._refresh_slot_ipe_thumbnails(slot_key)
+            self._update_slot_ipe_indicator(slot_key)
             self.db.log_activity("IPE Clear", f"Cleared data slot: {slot_key} (Previous file: {filename})", "User")
             self._log(f"הנתונים בסלוט {slot_key} נמחקו מהזיכרון.")
+
+    def _add_ipe_evidence(self, slot_key):
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self.window,
+            f"בחירת תמונות ראיה עבור {slot_key}",
+            "",
+            "Images (*.png *.jpg *.jpeg *.bmp *.gif);;All files (*.*)",
+        )
+        if not file_paths:
+            return
+        control_ids = controls_for_slot(slot_key)
+        for file_path in file_paths:
+            self.ipe_evidence_repo.add_image(
+                slot_key,
+                Path(file_path),
+                control_ids,
+                self.ipe_evidence_data,
+            )
+        self._refresh_slot_ipe_thumbnails(slot_key)
+        self._update_slot_ipe_indicator(slot_key)
+        self._log("נוספה ראיית IPE", slot=slot_key, files=len(file_paths))
+
+    def _remove_ipe_evidence(self, slot_key, image_id):
+        self.ipe_evidence_repo.remove_image(slot_key, image_id, self.ipe_evidence_data)
+        self._refresh_slot_ipe_thumbnails(slot_key)
+        self._update_slot_ipe_indicator(slot_key)
+
+    def _refresh_slot_ipe_thumbnails(self, slot_key):
+        layout = self.slot_ipe_thumb_layouts.get(slot_key)
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for entry in self.ipe_evidence_data.get(slot_key, []):
+            card = QWidget()
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(4, 4, 4, 4)
+            card_layout.setSpacing(2)
+            thumb = QLabel()
+            thumb.setFixedSize(72, 54)
+            thumb.setAlignment(Qt.AlignCenter)
+            stored = Path(str(entry.get("stored_path", "")))
+            pixmap = QPixmap(str(stored)) if stored.exists() else QPixmap()
+            if not pixmap.isNull():
+                thumb.setPixmap(pixmap.scaled(72, 54, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            else:
+                thumb.setText("IPE")
+            name = QLabel(str(entry.get("original_filename", ""))[:18])
+            name.setAlignment(Qt.AlignCenter)
+            remove_btn = QPushButton("הסר")
+            remove_btn.setFixedHeight(24)
+            remove_btn.setToolTip("הסר ראיה")
+            remove_btn.clicked.connect(
+                lambda _checked=False, sk=slot_key, image_id=entry.get("id"): self._remove_ipe_evidence(sk, image_id)
+            )
+            card_layout.addWidget(thumb)
+            card_layout.addWidget(name)
+            card_layout.addWidget(remove_btn)
+            layout.addWidget(card)
+        layout.addStretch(1)
+
+    def _update_slot_ipe_indicator(self, slot_key):
+        box = self.slot_group_boxes.get(slot_key)
+        if box is None:
+            return
+        has_file = slot_key in self.loaded_dataframes
+        has_ipe = bool(self.ipe_evidence_data.get(slot_key))
+        if has_file and has_ipe:
+            box.setStyleSheet("QGroupBox { border: 2px solid #2e7d32; border-radius: 6px; margin-top: 8px; }")
+        elif has_file and not has_ipe:
+            box.setStyleSheet("QGroupBox { border: 2px solid #ef6c00; border-radius: 6px; margin-top: 8px; }")
+        else:
+            box.setStyleSheet("")
 
     def _export_ipe_log(self):
         if not self.ipe_records:
@@ -1299,6 +1683,19 @@ class AuditGUI:
 
     def _handle_user_review_selection(self):
         self.selected_user_review_index = self._get_selected_user_review_index()
+
+    def _on_user_review_double_clicked(self, _row, _column):
+        self._open_user_review_row_dialog()
+
+    def _open_user_review_row_dialog(self):
+        row_index = self._get_selected_user_review_index()
+        if row_index is None or self.user_review_df.empty:
+            self._show_warning("לא נבחר משתמש", "בחר שורה מתוך דוח הסקירה כדי לצפות בפרטים.")
+            return
+
+        row = self.user_review_df.iloc[row_index].to_dict()
+        dialog = UserReviewRowDialog(self.window, row=row)
+        dialog.exec()
 
     def _get_user_review_filtered_df(self):
         if self.user_review_df.empty:
@@ -1330,12 +1727,17 @@ class AuditGUI:
         if self.user_review_report is not None:
             self.user_review_report["dataframe"] = self.user_review_df.copy()
             self.user_review_report["summary"]["exception_users"] = int((self.user_review_df["has_exception"] == "כן").sum())
+            if "user_type" in self.user_review_df.columns:
+                type_counts = self.user_review_df["user_type"].fillna("").astype(str).value_counts().to_dict()
+                self.user_review_report["summary"]["type_distribution"] = {
+                    str(user_type): int(count) for user_type, count in type_counts.items() if str(user_type).strip()
+                }
 
         self._update_user_review_summary()
         self._refresh_user_review_table()
 
     def _begin_inline_user_review_edit(self, *_args):
-        self._open_user_review_editor()
+        return
 
     def _cancel_inline_user_review_edit(self):
         self.user_review_inline_editor = None
@@ -1343,19 +1745,75 @@ class AuditGUI:
     def _commit_inline_user_review_edit(self):
         self.user_review_inline_editor = None
 
-    def _save_all_user_review_changes(self):
-        if self.user_review_df.empty:
-            self._show_warning("אין נתונים", "בנה תחילה דוח סקירת משתמשים.")
-            return
-        if not self.user_review_dirty_rows:
-            self._show_info("ללא שינויים", "אין שינויים חדשים לשמירה.")
+    def _import_user_review_excel(self):
+        if self.user_review_report is None or self.user_review_df.empty:
+            self._show_warning("אין נתונים", "בנה תחילה דוח סקירת משתמשים לפני ייבוא החלטות.")
             return
 
-        rows_to_save = self.user_review_df[self.user_review_df["user_name"].isin(self.user_review_dirty_rows)]
-        self.db.save_user_review_rows(rows_to_save.to_dict("records"))
-        saved_count = len(rows_to_save.index)
-        self.user_review_dirty_rows.clear()
-        self._show_info("הצלחה", f"נשמרו {saved_count} שורות בדוח הסקירה.")
+        file_path = self._get_open_file(
+            "ייבוא סקירת משתמשים מאקסל",
+            "Excel files (*.xlsx *.xlsm);;All files (*.*)",
+        )
+        if not file_path:
+            return
+
+        try:
+            preview = import_user_review_from_excel(
+                file_path,
+                self.user_review_df.copy(),
+                preserve_empty_notes=False,
+            )
+        except Exception as error:
+            self._show_error("שגיאת ייבוא", f"לא ניתן לקרוא את קובץ הסקירה.\n\n{error}")
+            return
+
+        dialog = ImportReviewConfirmDialog(
+            self.window,
+            total_in_file=preview["total_in_file"],
+            matched=preview["matched"],
+            unmatched=preview["unmatched"],
+            notes_cleared=preview["notes_cleared"],
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        preserve_notes = dialog.selected_mode == ImportReviewConfirmDialog.MODE_PRESERVE_NOTES
+        try:
+            result = import_user_review_from_excel(
+                file_path,
+                self.user_review_df,
+                preserve_empty_notes=preserve_notes,
+            )
+            self.user_review_df = result["updated_df"]
+            if self.user_review_report is not None:
+                self.user_review_report["dataframe"] = self.user_review_df.copy()
+                if "has_exception" in self.user_review_df.columns:
+                    self.user_review_report["summary"]["exception_users"] = int(
+                        (self.user_review_df["has_exception"] == "כן").sum()
+                    )
+            self.user_review_dirty_rows.clear()
+            if not self.user_review_df.empty:
+                self.db.save_user_review_rows(self.user_review_df.to_dict("records"))
+            self._update_user_review_summary()
+            self._refresh_user_review_table()
+            self._sync_user_review_completion_finding()
+            mode_label = "שמירת הערות קיימות" if preserve_notes else "כל השינויים"
+            unmatched_note = ""
+            if result["unmatched"]:
+                unmatched_note = f"\nדולגו {len(result['unmatched'])} משתמשים שלא נמצאו בדוח."
+            self._show_info(
+                "ייבוא הושלם",
+                f"עודכנו {result['matched']} רשומות ({mode_label}).{unmatched_note}",
+            )
+            self._log(
+                "ייבוא סקירת משתמשים מאקסל",
+                period=self.period_var.get(),
+                matched=result["matched"],
+                unmatched=len(result["unmatched"]),
+                mode=mode_label,
+            )
+        except Exception as error:
+            self._show_error("שגיאת ייבוא", f"הייבוא נכשל.\n\n{error}")
 
     def _validate_user_review_sources(self):
         required_slots = ["USERS", "GRANTED_PRIVILEGES"]
@@ -1372,6 +1830,10 @@ class AuditGUI:
                 file_name = self.loaded_files.get(slot_key, "קובץ לא מזוהה")
                 validation_errors.append(self._format_validation_message(slot_key, file_name, missing_columns, alternative_groups))
 
+        ipe_errors = self._missing_ipe_messages(required_slots)
+        if ipe_errors:
+            validation_errors.extend(ipe_errors)
+
         if validation_errors:
             return False, "\n\n--------------------\n\n".join(validation_errors)
         return True, ""
@@ -1383,6 +1845,7 @@ class AuditGUI:
             for label in self.review_summary_labels.values():
                 label.setText("0")
             self.user_type_tree.setRowCount(0)
+            self._update_user_review_progress_summary()
             return
 
         summary = self.user_review_report["summary"]
@@ -1394,17 +1857,36 @@ class AuditGUI:
         self.user_type_tree.setRowCount(0)
         for user_type, count in sorted(summary["type_distribution"].items()):
             self._set_table_row(self.user_type_tree, self.user_type_tree.rowCount(), [user_type, count])
+        self._update_user_review_progress_summary()
+
+    def _update_user_review_progress_summary(self):
+        progress = compute_review_progress(getattr(self, "user_review_df", None))
+        total = progress["total"]
+        reviewed = progress["reviewed"]
+        unreviewed = progress["unreviewed"]
+        percent = progress["percent"]
+
+        self.user_review_total_label.setText(f'סה"כ משתמשים בדוח: {total}')
+        self.user_review_reviewed_label.setText(f"משתמשים שנסקרו: {reviewed}")
+        self.user_review_unreviewed_label.setText(f"משתמשים שטרם נסקרו: {unreviewed}")
+        self.user_review_progress_percent_label.setText(f"התקדמות השלמת סקירה: {percent}%")
+        self.user_review_progress_bar.setMaximum(100)
+        self.user_review_progress_bar.setValue(percent)
+        self.user_review_progress_bar.setFormat(f"{percent}%")
 
     def _refresh_user_review_table(self):
+        was_sorting = self.user_review_tree.isSortingEnabled()
+        self.user_review_tree.setSortingEnabled(False)
         self.user_review_tree.setRowCount(0)
         if self.user_review_df.empty:
             self.user_review_visible_indices = []
+            self.user_review_tree.setSortingEnabled(was_sorting)
             return
 
         filtered_df = self._get_user_review_filtered_df()
         self.user_review_visible_indices = list(filtered_df.index)
 
-        for row_index, (_, row) in zip(self.user_review_visible_indices, filtered_df.iterrows()):
+        for df_index, (_, row) in zip(self.user_review_visible_indices, filtered_df.iterrows()):
             background = None
             if row.get("has_exception") == "כן":
                 background = QColor("#fde2e1")
@@ -1414,7 +1896,29 @@ class AuditGUI:
                 background = QColor("#fff3cd")
 
             values = [row.get(column_name, "") for column_name in self.user_review_columns]
-            self._set_table_row(self.user_review_tree, self.user_review_tree.rowCount(), values, background=background)
+            table_row = self.user_review_tree.rowCount()
+            self.user_review_tree.insertRow(table_row)
+            for column, (column_name, value) in enumerate(zip(self.user_review_columns, values)):
+                display = "" if value is None else str(value)
+                item = SortableTableWidgetItem(display)
+                item.setTextAlignment(Qt.AlignCenter if column != 0 else Qt.AlignRight | Qt.AlignVCenter)
+                item.setData(SortableTableWidgetItem.DF_INDEX_ROLE, int(df_index))
+                item.setData(SortableTableWidgetItem.SORT_ROLE, self._user_review_sort_key(column_name, value))
+                if background is not None:
+                    item.setBackground(background)
+                self.user_review_tree.setItem(table_row, column, item)
+
+        self.user_review_tree.setSortingEnabled(was_sorting)
+
+    def _user_review_sort_key(self, column_name, value):
+        if value is None:
+            return ""
+        if column_name == "days_since_login":
+            text = str(value).strip()
+            if text.isdigit() or (text.startswith("-") and text[1:].isdigit()):
+                return f"{int(text):010d}"
+            return f"~{text}"
+        return str(value)
 
     def _generate_user_review(self):
         is_valid, validation_message = self._validate_user_review_sources()
@@ -1444,6 +1948,7 @@ class AuditGUI:
                 self.db.save_user_review_rows(self.user_review_df.to_dict("records"))
             self._update_user_review_summary()
             self._refresh_user_review_table()
+            self._sync_user_review_completion_finding()
             self._show_info("הושלם", f"דוח הסקירה נבנה בהצלחה עבור {len(self.user_review_df)} משתמשים.")
         except Exception as error:
             self._show_error("שגיאה בבניית דוח סקירה", str(error))
@@ -1472,93 +1977,17 @@ class AuditGUI:
 
     def _get_selected_user_review_index(self):
         row = self.user_review_tree.currentRow()
-        if row < 0 or row >= len(self.user_review_visible_indices):
+        if row < 0:
             return None
-        return self.user_review_visible_indices[row]
-
-    def _open_user_review_editor(self, _event=None):
-        row_index = self._get_selected_user_review_index()
-        if row_index is None or self.user_review_df.empty:
-            self._show_warning("לא נבחר משתמש", "בחר שורה מתוך דוח הסקירה כדי לעדכן החלטת מנהל.")
-            return
-
-        row = self.user_review_df.iloc[row_index]
-        self.selected_user_review_index = row_index
-
-        dialog = QDialog(self.window)
-        dialog.setWindowTitle("עדכון החלטת מנהל")
-        dialog.resize(620, 460)
-        layout = QVBoxLayout(dialog)
-
-        title = QLabel(f"משתמש: {row['user_name']}")
-        title.setProperty("class", "section")
-        layout.addWidget(title)
-
-        metadata_text = (
-            f"סוג משתמש: {row['user_type']}\n"
-            f"סטטוס: {row['active_status']}\n"
-            f"החרגת סיסמה: {row.get('password_policy_exempt_status', '-')}\n"
-            f"סיבת החרגה: {row.get('password_policy_exempt_reason', '-')}\n"
-            f"גישה לטבלאות מערכת: {row.get('system_table_access_status', '-')}\n"
-            f"חריג: {row['has_exception']}\n"
-            f"סיבת חריג: {row['exception_reason']}"
-        )
-        metadata = QLabel(metadata_text)
-        metadata.setWordWrap(True)
-        layout.addWidget(metadata)
-
-        form = QFormLayout()
-        review_status_box = QComboBox()
-        review_status_box.addItems(["טרם נסקר", "נסקר", "דורש מעקב"])
-        review_status_box.setCurrentText(str(row.get("review_status", "טרם נסקר")))
-        manager_decision_box = QComboBox()
-        manager_decision_box.addItems(["", "מאושר", "לא מאושר", "נדרש בירור"])
-        manager_decision_box.setCurrentText(str(row.get("manager_decision", "")))
-        action_required_box = QComboBox()
-        action_required_box.addItems(["", "נדרש להסרה", "מאושר להשאיר"])
-        action_required_box.setCurrentText(str(row.get("action_required", "")))
-        has_exception_box = QComboBox()
-        has_exception_box.addItems(["כן", "לא"])
-        has_exception_box.setCurrentText(str(row.get("has_exception", "לא")))
-        exception_reason_input = QLineEdit("" if row.get("exception_reason") == "-" else str(row.get("exception_reason", "")))
-        comments_text = QTextEdit()
-        comments_text.setPlainText(str(row.get("manager_comments", "")))
-
-        form.addRow("סטטוס סקירה", review_status_box)
-        form.addRow("החלטת מנהל", manager_decision_box)
-        form.addRow("נדרש להסרה / מאושר להשאיר", action_required_box)
-        form.addRow("חריג", has_exception_box)
-        form.addRow("סיבת חריג", exception_reason_input)
-        form.addRow("הערות", comments_text)
-        layout.addLayout(form)
-
-        button_layout = QHBoxLayout()
-        save_btn = QPushButton("שמור")
-        cancel_btn = QPushButton("ביטול")
-        button_layout.addWidget(save_btn)
-        button_layout.addWidget(cancel_btn)
-        button_layout.addStretch(1)
-        layout.addLayout(button_layout)
-
-        def save_changes():
-            updates = {
-                "review_status": review_status_box.currentText().strip() or "טרם נסקר",
-                "manager_decision": manager_decision_box.currentText().strip(),
-                "action_required": action_required_box.currentText().strip(),
-                "has_exception": has_exception_box.currentText().strip() or "לא",
-                "exception_reason": exception_reason_input.text().strip() or "-",
-                "manager_comments": comments_text.toPlainText().strip(),
-            }
-            self._apply_user_review_changes(row_index, updates)
-            refreshed_index = next((index for index, (_, current_row) in enumerate(self.user_review_df.iterrows()) if current_row.get("user_name") == row.get("user_name")), None)
-            if refreshed_index is not None:
-                self.selected_user_review_index = refreshed_index
-            dialog.accept()
-            self._show_info("הצלחה", "השינויים בדוח נשמרו.")
-
-        save_btn.clicked.connect(save_changes)
-        cancel_btn.clicked.connect(dialog.reject)
-        dialog.exec()
+        item = self.user_review_tree.item(row, 0)
+        if item is None:
+            return None
+        df_index = item.data(SortableTableWidgetItem.DF_INDEX_ROLE)
+        if df_index is None:
+            if row >= len(self.user_review_visible_indices):
+                return None
+            return self.user_review_visible_indices[row]
+        return int(df_index)
 
     def _export_user_review_excel(self):
         if self.user_review_report is None or self.user_review_df.empty:
@@ -1655,17 +2084,112 @@ class AuditGUI:
         else:
             self.sort_column = column
             self.sort_reverse = False
-        self._refresh_findings_table()
+        self._refresh_selected_finding_detail()
 
     def _on_findings_header_clicked(self, section_index):
         if 0 <= section_index < len(self.findings_column_order):
             self._sort_by_column(self.findings_column_order[section_index])
 
     def _refresh_findings_table(self):
-        self.displayed_findings = self._get_filtered_findings()
-        self.displayed_findings.sort(key=lambda finding: self._get_sort_key(finding, self.sort_column), reverse=self.sort_reverse)
-        self.tree.setRowCount(0)
+        self._rebuild_findings_master_detail()
 
+    def _rebuild_findings_master_detail(self):
+        filtered = self._get_filtered_findings()
+        catalog = load_controls_catalog()
+        self.findings_details_by_control = details_by_control(filtered)
+        self.findings_summary_records = aggregate_findings_by_control(
+            filtered,
+            catalog,
+            source_file_getter=self._get_source_file_name,
+        )
+
+        previous_control = self.selected_finding_control_id
+        was_sorting = self.findings_summary_table.isSortingEnabled()
+        self._suppress_findings_selection = True
+        self.findings_summary_table.setSortingEnabled(False)
+        self.findings_summary_table.setRowCount(0)
+
+        for row_data in sorted_summary_rows(self.findings_summary_records):
+            values = build_summary_row_values(row_data)
+            table_row = self.findings_summary_table.rowCount()
+            self.findings_summary_table.insertRow(table_row)
+            control_id_value = str(row_data.get("control_id", ""))
+            # Text columns 0-6, button at 7, then remaining text at 8+
+            for source_index, value in enumerate(values):
+                target_col = source_index if source_index < 7 else source_index + 1
+                item = SortableTableWidgetItem("" if value is None else str(value))
+                item.setTextAlignment(Qt.AlignCenter if target_col != 0 else Qt.AlignRight | Qt.AlignVCenter)
+                item.setData(SortableTableWidgetItem.DF_INDEX_ROLE, control_id_value)
+                item.setData(SortableTableWidgetItem.SORT_ROLE, self._summary_sort_key(source_index, value))
+                if target_col == 0:
+                    item.setData(Qt.UserRole, control_id_value)
+                risk = str(row_data.get("risk_level", ""))
+                if risk == "High":
+                    item.setBackground(QColor("#f8d7da"))
+                elif risk == "Medium":
+                    item.setBackground(QColor("#fff3cd"))
+                self.findings_summary_table.setItem(table_row, target_col, item)
+
+            wp_button = QPushButton("צור נייר עבודה")
+            wp_button.setToolTip("ייצוא נייר עבודה לאקסל עבור הבקרה")
+            wp_button.clicked.connect(
+                lambda _checked=False, cid=control_id_value: self._export_control_working_paper(cid)
+            )
+            self.findings_summary_table.setCellWidget(table_row, 7, wp_button)
+
+        self.findings_summary_table.setSortingEnabled(was_sorting)
+        self._suppress_findings_selection = False
+
+        target_row = 0
+        if previous_control:
+            for row in range(self.findings_summary_table.rowCount()):
+                item = self.findings_summary_table.item(row, 0)
+                if item and str(item.data(Qt.UserRole) or item.text()) == previous_control:
+                    target_row = row
+                    break
+
+        if self.findings_summary_table.rowCount() > 0:
+            self.findings_summary_table.selectRow(target_row)
+            self._refresh_selected_finding_detail()
+        else:
+            self.selected_finding_control_id = None
+            self.displayed_findings = []
+            self.findings_detail_table.setRowCount(0)
+
+    def _summary_sort_key(self, column, value):
+        text = "" if value is None else str(value).strip()
+        if column in {4, 5, 6}:
+            if text.isdigit() or (text.startswith("-") and text[1:].isdigit()):
+                return f"{int(text):010d}"
+        if column == 3:
+            priority = {"High": "0", "Medium": "1", "Low": "2"}
+            return priority.get(text, f"9{text}")
+        return text
+
+    def _get_selected_finding_control_id(self):
+        row = self.findings_summary_table.currentRow()
+        if row < 0:
+            return None
+        item = self.findings_summary_table.item(row, 0)
+        if item is None:
+            return None
+        return str(item.data(Qt.UserRole) or item.text() or "").strip() or None
+
+    def _refresh_selected_finding_detail(self):
+        if self._suppress_findings_selection:
+            return
+        control_id = self._get_selected_finding_control_id()
+        self.selected_finding_control_id = control_id
+        detail_findings = list(self.findings_details_by_control.get(control_id, [])) if control_id else []
+        detail_findings.sort(
+            key=lambda finding: self._get_sort_key(finding, self.sort_column),
+            reverse=self.sort_reverse,
+        )
+        self.displayed_findings = detail_findings
+
+        was_sorting = self.findings_detail_table.isSortingEnabled()
+        self.findings_detail_table.setSortingEnabled(False)
+        self.findings_detail_table.setRowCount(0)
         for finding in self.displayed_findings:
             background = None
             foreground = None
@@ -1689,10 +2213,26 @@ class AuditGUI:
                 getattr(finding, "expected_value", None) or "-",
                 finding.status,
             ]
-            self._set_table_row(self.tree, self.tree.rowCount(), values, background=background, foreground=foreground)
+            table_row = self.findings_detail_table.rowCount()
+            self.findings_detail_table.insertRow(table_row)
+            for column, value in enumerate(values):
+                item = SortableTableWidgetItem("" if value is None else str(value))
+                item.setTextAlignment(Qt.AlignCenter if column != 0 else Qt.AlignRight | Qt.AlignVCenter)
+                item.setData(SortableTableWidgetItem.DF_INDEX_ROLE, table_row)
+                item.setData(
+                    SortableTableWidgetItem.SORT_ROLE,
+                    self._get_sort_key(finding, self.findings_column_order[column]),
+                )
+                if background is not None:
+                    item.setBackground(background)
+                if foreground is not None:
+                    item.setForeground(foreground)
+                self.findings_detail_table.setItem(table_row, column, item)
+        self.findings_detail_table.setSortingEnabled(was_sorting)
 
     def _export_findings_to_excel(self):
-        if not self.displayed_findings:
+        export_findings = self._get_filtered_findings()
+        if not export_findings:
             self._show_warning("אין נתונים", "אין ממצאים לייצוא בטבלה הנוכחית.")
             return
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1701,9 +2241,11 @@ class AuditGUI:
             return
         try:
             export_rows = []
-            for finding in self.displayed_findings:
+            for finding in export_findings:
+                ensure_finding_control_id(finding)
                 export_rows.append(
                     {
+                        "מזהה בקרה": getattr(finding, "control_id", None) or "-",
                         "קובץ מקור": self._get_source_file_name(finding),
                         "תאריך הפקה": getattr(finding, "extract_date", "-"),
                         "קטגוריה": finding.category,
@@ -1727,10 +2269,22 @@ class AuditGUI:
         return str(value)
 
     def _open_finding_details(self, _event=None):
-        row = self.tree.currentRow()
-        if row < 0 or row >= len(self.displayed_findings):
+        row = self.findings_detail_table.currentRow()
+        if row < 0:
             return
-        finding = self.displayed_findings[row]
+        item = self.findings_detail_table.item(row, 0)
+        if item is None:
+            return
+        stored = item.data(SortableTableWidgetItem.DF_INDEX_ROLE)
+        if stored is None:
+            if row >= len(self.displayed_findings):
+                return
+            finding = self.displayed_findings[row]
+        else:
+            index = int(stored)
+            if index < 0 or index >= len(self.displayed_findings):
+                return
+            finding = self.displayed_findings[index]
 
         dialog = QDialog(self.window)
         dialog.setWindowTitle("פירוט ממצא")
@@ -1745,6 +2299,7 @@ class AuditGUI:
         form_box = QGroupBox("פרטי הממצא")
         form = QFormLayout(form_box)
         detail_rows = [
+            ("מזהה בקרה", getattr(finding, "control_id", None)),
             ("קטגוריה", finding.category),
             ("רמת סיכון", finding.risk_level),
             ("סטטוס", finding.status),
@@ -1771,6 +2326,95 @@ class AuditGUI:
         layout.addWidget(close_btn, alignment=Qt.AlignLeft)
         dialog.exec()
 
+    def _capture_control_populations(self, max_rows: int = 5000):
+        catalog = load_controls_catalog()
+        self.control_to_slot_key = {}
+        self.control_to_slot_rows = {}
+        for control_id in set(getattr(finding, "control_id", None) for finding in self.current_findings):
+            if not control_id:
+                continue
+            slot_key = primary_slot_for_control(control_id, catalog)
+            if not slot_key or slot_key not in self.loaded_dataframes:
+                continue
+            df = self.loaded_dataframes[slot_key]
+            sample = df.head(max_rows) if len(df.index) > max_rows else df
+            self.control_to_slot_key[control_id] = slot_key
+            self.control_to_slot_rows[control_id] = sample.fillna("").astype(str).to_dict("records")
+
+    def _ipe_entries_for_control(self, control_id: str) -> list[dict]:
+        entries = []
+        for slot_key, slot_entries in self.ipe_evidence_data.items():
+            for entry in slot_entries:
+                control_ids = entry.get("control_ids") or []
+                if control_id in control_ids or control_id == "DB-SUPPLEMENTAL":
+                    enriched = dict(entry)
+                    enriched["slot_key"] = slot_key
+                    entries.append(enriched)
+        if entries:
+            return entries
+        # Fallback: primary slot evidence even if mapping empty
+        slot_key = self.control_to_slot_key.get(control_id) or primary_slot_for_control(control_id)
+        if slot_key:
+            return list(self.ipe_evidence_data.get(slot_key, []))
+        return []
+
+    def _finding_to_detail_dict(self, finding) -> dict:
+        return {
+            "category": finding.category,
+            "risk_level": finding.risk_level,
+            "title": finding.title,
+            "comparison_rule": getattr(finding, "comparison_rule", None),
+            "actual_value": getattr(finding, "actual_value", None),
+            "expected_value": getattr(finding, "expected_value", None),
+            "status": finding.status,
+            "source_file": self._get_source_file_name(finding),
+            "source_slot": getattr(finding, "source_slot", None),
+            "extract_date": getattr(finding, "extract_date", None),
+            "description": finding.description,
+            "user_name": getattr(finding, "actual_value", None),
+        }
+
+    def _export_control_working_paper(self, control_id: str):
+        if not control_id:
+            return
+        catalog = load_controls_catalog()
+        summary_record = self.findings_summary_records.get(control_id)
+        if summary_record is None:
+            self._show_warning("אין נתונים", "לא נמצאה שורת ריכוז עבור הבקרה שנבחרה.")
+            return
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = safe_working_paper_filename(control_id, timestamp)
+        save_path = self._get_save_file("שמירת נייר עבודה", "Excel Workbook (*.xlsx)", default_name)
+        if not save_path:
+            return
+
+        detail_findings = self.findings_details_by_control.get(control_id, [])
+        detail_rows = [self._finding_to_detail_dict(finding) for finding in detail_findings]
+        raw_rows = list(self.control_to_slot_rows.get(control_id, []))
+        if not raw_rows:
+            self._capture_control_populations()
+            raw_rows = list(self.control_to_slot_rows.get(control_id, []))
+        note = None
+        if not raw_rows:
+            note = "לא נטענה אוכלוסייה גולמית לסלוט הראשי של הבקרה."
+
+        try:
+            write_control_working_paper(
+                control_id=control_id,
+                catalog_entry=catalog.get(control_id, {}),
+                summary_record=summary_record,
+                detail_rows=detail_rows,
+                raw_population_rows=raw_rows,
+                ipe_entries=self._ipe_entries_for_control(control_id),
+                output_path=Path(save_path),
+                raw_population_note=note,
+            )
+            self._show_info("הצלחה", f"נייר העבודה נשמר:\n{save_path}")
+            self._log("יוצא נייר עבודה", control_id=control_id, path=save_path)
+        except Exception as error:
+            self._show_error("שגיאת ייצוא", f"לא ניתן ליצור נייר עבודה.\n\n{error}")
+
     def _run_audit(self):
         if not self.loaded_dataframes:
             self._show_warning("חסר מידע", "אנא טען קבצי מקור בלשונית ה-IPE.")
@@ -1787,11 +2431,18 @@ class AuditGUI:
             self.run_btn.setEnabled(False)
             self._log("החל ניתוח ITGC", period=self.period_var.get(), loaded_slots=loaded_slots)
             config = self._current_config()
-            analyzer = AuditAnalyzer(config=config, whitelist=self.db.get_whitelist())
-            findings = analyzer.run_all_checks(self.loaded_dataframes, period_id=self.period_var.get())
+            findings, validator_warnings = run_audit_analysis(
+                self.loaded_dataframes,
+                config,
+                whitelist=self.db.get_whitelist(),
+                period_id=self.period_var.get(),
+            )
+            for warning in validator_warnings:
+                self._log(warning, period=self.period_var.get())
             findings.extend(self._build_findings_from_user_review())
             findings = self._attach_findings_source_metadata(findings)
             self.current_findings = findings
+            self._capture_control_populations()
             self.summary_vars["total"].set(str(len(findings)))
             self.summary_vars["high"].set(str(sum(1 for finding in findings if getattr(finding, "risk_level", "") == "High")))
             self.summary_vars["status"].set("הושלם")
@@ -1817,6 +2468,10 @@ class AuditGUI:
             return []
 
         findings = []
+        completion_finding = build_review_completion_finding(self.period_var.get(), review_df)
+        if completion_finding is not None:
+            findings.append(completion_finding)
+
         exception_rows = review_df[review_df["has_exception"] == "כן"]
         for _, row in exception_rows.iterrows():
             username = row.get("user_name", "-")
@@ -1833,9 +2488,29 @@ class AuditGUI:
                     actual_value=str(reason),
                     expected_value="לא נדרש חריג / קיימת הצדקה מתועדת",
                     comparison_rule="סקירת משתמשים",
+                    control_id="DB-UAR-02_PLACEHOLDER",
+                    analysis_type="PERIODIC_UAR",
                 )
             )
         return findings
+
+    def _sync_user_review_completion_finding(self):
+        if not hasattr(self, "current_findings") or self.current_findings is None:
+            return
+
+        self.current_findings = [
+            finding
+            for finding in self.current_findings
+            if getattr(finding, "comparison_rule", None) != REVIEW_COMPLETION_COMPARISON_RULE
+        ]
+        completion_finding = build_review_completion_finding(
+            self.period_var.get(),
+            getattr(self, "user_review_df", None),
+        )
+        if completion_finding is not None:
+            self.current_findings.append(completion_finding)
+        if hasattr(self, "tree"):
+            self._refresh_findings_table()
 
     def _ensure_user_review_report_for_audit(self):
         if self.user_review_report is not None and not self.user_review_df.empty:

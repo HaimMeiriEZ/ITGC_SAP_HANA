@@ -76,7 +76,7 @@ class AuditGUI:
             "last_used_passwords": 5,
             "maximum_invalid_connect_attempts": 6,
             "minimal_password_lifetime": 1,
-            "maximum_password_lifetime": 182,
+            "maximum_password_lifetime": 90,
             "maximum_unused_initial_password_lifetime": 7,
             "maximum_unused_productive_password_lifetime": 365,
             "password_expire_warning_time": 14,

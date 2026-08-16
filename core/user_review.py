@@ -25,6 +25,7 @@ PERIOD_START_COLUMNS = ["VALID_FROM", "USER_VALID_FROM", "CREATED_ON", "CREATE_D
 PERIOD_END_COLUMNS = ["VALID_TO", "USER_VALID_TO", "DEACTIVATION_DATE", "DEACTIVATED_ON", "VALIDITY_END"]
 
 PASSWORD_EXEMPT_FLAG_COLUMNS = [
+    "IS_PASSWORD_LIFETIME_CHECK_ENABLED",
     "PASSWORD_POLICY_EXEMPT",
     "IS_PASSWORD_POLICY_EXEMPT",
     "IS_PASSWORD_POLICY_DISABLED",
@@ -54,6 +55,99 @@ SYSTEM_TABLE_NAMES = {
     "M_HOST_INFORMATION",
 }
 READ_ONLY_SYSTEM_TABLE_PRIVILEGES = {"SELECT"}
+
+USER_REVIEW_SHEET_NAME = "User Review"
+
+EXPORT_COLUMN_RENAME = {
+    "user_name": "שם משתמש",
+    "in_scope": "באוכלוסיית הסקירה",
+    "active_status": "סטטוס משתמש",
+    "active_in_period": "פעיל בתקופת הביקורת",
+    "period_activity_reason": "נימוק פעילות בתקופה",
+    "last_login": "התחברות אחרונה",
+    "days_since_login": "ימים מאז התחברות",
+    "user_type": "סוג משתמש",
+    "has_privileges": "יש הרשאות",
+    "critical_privileges": "הרשאות קריטיות",
+    "all_privileges": "כלל הרשאות",
+    "password_policy_exempt_status": "מוחרג ממדיניות סיסמה",
+    "password_policy_exempt_reason": "סיבת החרגה",
+    "password_policy_exempt_source": "עמודת מקור להחרגה",
+    "system_table_access_status": "גישה לטבלאות מערכת",
+    "system_table_access_details": "פירוט גישה לטבלאות מערכת",
+    "has_exception": "חריג",
+    "exception_reason": "סיבת חריג",
+    "review_status": "סטטוס סקירה",
+    "manager_decision": "החלטת מנהל",
+    "manager_comments": "הערות",
+    "action_required": "נדרש להסרה / מאושר להשאיר",
+    "extract_date": "תאריך הפקה",
+    "review_date": "תאריך סקירה",
+}
+
+IMPORT_HEADER_TO_FIELD = {hebrew: field for field, hebrew in EXPORT_COLUMN_RENAME.items()}
+IMPORTABLE_FIELDS = ("review_status", "manager_decision", "action_required", "manager_comments")
+
+REVIEW_STATUS_OPTIONS = ["טרם נסקר", "נסקר", "דורש מעקב"]
+MANAGER_DECISION_OPTIONS = ["מאושר", "לא מאושר", "נדרש בירור"]
+ACTION_REQUIRED_OPTIONS = ["נדרש להסרה", "מאושר להשאיר"]
+
+REVIEW_DECISION_DROPDOWNS = {
+    "סטטוס סקירה": REVIEW_STATUS_OPTIONS,
+    "החלטת מנהל": MANAGER_DECISION_OPTIONS,
+    "נדרש להסרה / מאושר להשאיר": ACTION_REQUIRED_OPTIONS,
+}
+
+UNREVIEWED_STATUS = "טרם נסקר"
+USER_TYPE_OPTIONS = ["Dialog", "Generic", "Technical", "Application"]
+REVIEW_COMPLETION_COMPARISON_RULE = "השלמת סקירת משתמשים"
+
+
+def compute_review_progress(review_df: Optional[pd.DataFrame]) -> Dict[str, int]:
+    """Compute review completion stats from a user-review dataframe.
+
+    A row is reviewed when review_status is present and not "טרם נסקר".
+    """
+    if review_df is None or review_df.empty or "review_status" not in review_df.columns:
+        return {"total": 0, "reviewed": 0, "unreviewed": 0, "percent": 0}
+
+    total = int(len(review_df.index))
+    statuses = review_df["review_status"].map(lambda value: _normalize_text(value) or UNREVIEWED_STATUS)
+    reviewed = int((statuses != UNREVIEWED_STATUS).sum())
+    unreviewed = max(0, total - reviewed)
+    percent = int(round((reviewed / total) * 100)) if total > 0 else 0
+    return {
+        "total": total,
+        "reviewed": reviewed,
+        "unreviewed": unreviewed,
+        "percent": percent,
+    }
+
+
+def build_review_completion_finding(period_id: str, review_df: Optional[pd.DataFrame]):
+    """Return a Finding when review progress is below 100%, otherwise None."""
+    from DataClasses import Finding
+
+    progress = compute_review_progress(review_df)
+    if progress["total"] <= 0 or progress["percent"] >= 100:
+        return None
+    return Finding(
+        period_id=period_id,
+        category="User Review",
+        title=f"סקירת משתמשים לא הושלמה ({progress['percent']}%)",
+        description=(
+            f"נסקרו {progress['reviewed']}/{progress['total']}; "
+            f"טרם נסקרו {progress['unreviewed']}."
+        ),
+        risk_level="High",
+        status="Non-Compliant",
+        source_slot="USERS",
+        actual_value=f"{progress['percent']}%",
+        expected_value="100%",
+        comparison_rule=REVIEW_COMPLETION_COMPARISON_RULE,
+        control_id="DB-UAR-02_PLACEHOLDER",
+        analysis_type="PERIODIC_UAR",
+    )
 
 
 def _find_existing_column(df: pd.DataFrame, candidates: Iterable[str]) -> Optional[str]:
@@ -398,7 +492,9 @@ def build_user_review_report(
             last_login=last_login,
         )
         privilege_info = privilege_lookup.get(username, {"all": [], "critical": []})
-        user_type = _classify_user(username, user_type_rules, critical_users)
+        classified = _classify_user(username, user_type_rules, critical_users)
+        saved_type = _normalize_text(saved_review.get("user_type", ""))
+        user_type = saved_type if saved_type else classified
         type_distribution[user_type] = type_distribution.get(user_type, 0) + 1
 
         is_in_scope = bool(period_activity_info["is_active_in_period"])
@@ -509,6 +605,10 @@ def build_user_review_report(
 
 
 def export_user_review_to_excel(report_data: Dict[str, Any], file_path: str):
+    from openpyxl.styles import PatternFill
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.datavalidation import DataValidation
+
     review_df = report_data["dataframe"]
     summary = report_data["summary"]
     metadata = report_data["metadata"]
@@ -535,40 +635,18 @@ def export_user_review_to_excel(report_data: Dict[str, Any], file_path: str):
         {"שדה": "מועד הפקה", "ערך": metadata["generated_at"]},
     ]
 
-    export_df = review_df.rename(
-        columns={
-            "user_name": "שם משתמש",
-            "in_scope": "באוכלוסיית הסקירה",
-            "active_status": "סטטוס משתמש",
-            "active_in_period": "פעיל בתקופת הביקורת",
-            "period_activity_reason": "נימוק פעילות בתקופה",
-            "last_login": "התחברות אחרונה",
-            "days_since_login": "ימים מאז התחברות",
-            "user_type": "סוג משתמש",
-            "has_privileges": "יש הרשאות",
-            "critical_privileges": "הרשאות קריטיות",
-            "all_privileges": "כלל הרשאות",
-            "password_policy_exempt_status": "מוחרג ממדיניות סיסמה",
-            "password_policy_exempt_reason": "סיבת החרגה",
-            "password_policy_exempt_source": "עמודת מקור להחרגה",
-            "system_table_access_status": "גישה לטבלאות מערכת",
-            "system_table_access_details": "פירוט גישה לטבלאות מערכת",
-            "has_exception": "חריג",
-            "exception_reason": "סיבת חריג",
-            "review_status": "סטטוס סקירה",
-            "manager_decision": "החלטת מנהל",
-            "manager_comments": "הערות",
-            "action_required": "נדרש להסרה / מאושר להשאיר",
-            "extract_date": "תאריך הפקה",
-            "review_date": "תאריך סקירה",
-        }
-    )
+    export_df = review_df.rename(columns=EXPORT_COLUMN_RENAME)
+    export_df = export_df.drop(columns=["status_sort"], errors="ignore")
+    for column in export_df.columns:
+        export_df[column] = export_df[column].apply(
+            lambda value: "" if value is None or (isinstance(value, float) and pd.isna(value)) else value
+        )
 
     with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
         pd.DataFrame(summary_rows).to_excel(writer, sheet_name="Executive Summary", index=False)
         pd.DataFrame(type_rows).to_excel(writer, sheet_name="User Types", index=False)
         pd.DataFrame(metadata_rows).to_excel(writer, sheet_name="Metadata", index=False)
-        export_df.drop(columns=["status_sort"], errors="ignore").to_excel(writer, sheet_name="User Review", index=False)
+        export_df.to_excel(writer, sheet_name=USER_REVIEW_SHEET_NAME, index=False)
 
         workbook = writer.book
         for sheet in workbook.worksheets:
@@ -576,6 +654,127 @@ def export_user_review_to_excel(report_data: Dict[str, Any], file_path: str):
             for column_cells in sheet.columns:
                 max_length = max(len(str(cell.value)) if cell.value is not None else 0 for cell in column_cells)
                 sheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_length + 2, 12), 40)
+
+        review_sheet = workbook[USER_REVIEW_SHEET_NAME]
+        headers = [cell.value for cell in review_sheet[1]]
+        header_to_col = {str(name): idx + 1 for idx, name in enumerate(headers) if name is not None}
+        yellow_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+        max_row = max(review_sheet.max_row, 2)
+
+        for hebrew_header, options in REVIEW_DECISION_DROPDOWNS.items():
+            col_idx = header_to_col.get(hebrew_header)
+            if not col_idx:
+                continue
+            col_letter = get_column_letter(col_idx)
+            for row_idx in range(2, max_row + 1):
+                review_sheet.cell(row=row_idx, column=col_idx).fill = yellow_fill
+            formula = '"' + ",".join(options) + '"'
+            validation = DataValidation(type="list", formula1=formula, allow_blank=True)
+            validation.error = "נא לבחור ערך מהרשימה"
+            validation.errorTitle = "ערך לא תקין"
+            validation.prompt = "בחר ערך מהרשימה"
+            validation.promptTitle = hebrew_header
+            review_sheet.add_data_validation(validation)
+            validation.add(f"{col_letter}2:{col_letter}{max_row}")
+
+
+def import_user_review_from_excel(
+    file_path: str | Path,
+    existing_df: pd.DataFrame,
+    *,
+    preserve_empty_notes: bool = False,
+) -> Dict[str, Any]:
+    """Import manager review decisions from an exported User Review Excel file.
+
+    Updates only: review_status, manager_decision, action_required, manager_comments.
+    Matching key: user_name / שם משתמש.
+    """
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"קובץ הייבוא לא נמצא: {path}")
+
+    xl = pd.ExcelFile(path)
+    sheet_name = USER_REVIEW_SHEET_NAME if USER_REVIEW_SHEET_NAME in xl.sheet_names else xl.sheet_names[0]
+    imported = pd.read_excel(path, sheet_name=sheet_name)
+    if imported.empty:
+        raise ValueError("גיליון הסקירה בקובץ ריק.")
+
+    rename_map: Dict[str, str] = {}
+    for column in imported.columns:
+        key = str(column).strip()
+        if key in IMPORT_HEADER_TO_FIELD:
+            rename_map[column] = IMPORT_HEADER_TO_FIELD[key]
+        elif key in IMPORTABLE_FIELDS:
+            rename_map[column] = key
+    imported = imported.rename(columns=rename_map)
+
+    if "user_name" not in imported.columns:
+        raise ValueError("חסרה עמודת מפתח 'שם משתמש' / user_name בקובץ הייבוא.")
+
+    updated_df = existing_df.copy()
+    if "user_name" not in updated_df.columns:
+        raise ValueError("לדוח הסקירה הנוכחי חסרה עמודת user_name.")
+
+    for field in IMPORTABLE_FIELDS:
+        if field not in updated_df.columns:
+            updated_df[field] = ""
+
+    index_by_user = {
+        _normalize_text(row.get("user_name")).upper(): idx
+        for idx, row in updated_df.iterrows()
+        if _normalize_text(row.get("user_name"))
+    }
+
+    matched = 0
+    unmatched: List[str] = []
+    notes_cleared: List[str] = []
+    skipped = 0
+
+    for _, row in imported.iterrows():
+        username = _normalize_text(row.get("user_name"))
+        if not username:
+            skipped += 1
+            continue
+        target_idx = index_by_user.get(username.upper())
+        if target_idx is None:
+            unmatched.append(username)
+            continue
+
+        matched += 1
+        for field in ("review_status", "manager_decision", "action_required"):
+            if field not in imported.columns:
+                continue
+            value = row.get(field)
+            if pd.isna(value):
+                value = ""
+            text = str(value).strip()
+            if field == "review_status" and not text:
+                text = "טרם נסקר"
+            updated_df.at[target_idx, field] = text
+
+        if "manager_comments" in imported.columns:
+            raw_notes = row.get("manager_comments")
+            if pd.isna(raw_notes):
+                raw_notes = ""
+            notes_text = str(raw_notes).strip()
+            existing_notes = _normalize_text(updated_df.at[target_idx, "manager_comments"])
+            if not notes_text and existing_notes:
+                notes_cleared.append(username)
+                if not preserve_empty_notes:
+                    updated_df.at[target_idx, "manager_comments"] = ""
+            else:
+                updated_df.at[target_idx, "manager_comments"] = notes_text
+
+    return {
+        "updated_df": updated_df,
+        "matched": matched,
+        "unmatched": unmatched,
+        "skipped": skipped,
+        "notes_cleared": notes_cleared,
+        "sheet_name": sheet_name,
+        "total_in_file": int(len(imported.index)),
+    }
+
 
 
 def export_user_review_to_pdf(report_data: Dict[str, Any], file_path: str):

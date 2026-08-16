@@ -6,6 +6,15 @@
         "_SYS_REPO",
         "XSSQLCC_AUTO_USER"
     ],
+    "builtin_users": [
+        "SYSTEM",
+        "_SYS_REPO",
+        "_SYS_STATISTICS",
+        "_SYS_TASK",
+        "_SYS_XB",
+        "_SYS_SQL_ANALYZER",
+        "_SYS_WORKLOAD_REPLAY"
+    ],
     "critical_roles": [
         "SAP_INTERNAL_HANA_SUPPORT",
         "PUBLIC"
@@ -52,7 +61,7 @@
         "last_used_passwords": 5,
         "maximum_invalid_connect_attempts": 6,
         "minimal_password_lifetime": 1,
-        "maximum_password_lifetime": 182,
+        "maximum_password_lifetime": 90,
         "maximum_unused_initial_password_lifetime": 7,
         "maximum_unused_productive_password_lifetime": 365,
         "password_expire_warning_time": 14,
@@ -167,6 +176,9 @@
         }
     ],
     "inactive_days_threshold": 120,
+    "user_provisioning_lookback_days": 180,
+    "system_table_authorized_users": [],
+    "analytic_authorized_developers": [],
     "user_review_period": {
         "start_date": "2025-01-01",
         "end_date": "2025-12-31"

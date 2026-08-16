@@ -17,6 +17,13 @@ logs/*.log
 *.sqlite
 *.sqlite3
 
+# Local IPE screenshots and evidence index
+data/evidence/
+data/output/
+
+# Editor settings
+.vscode/
+
 # OS noise
 Desktop.ini
 desktop.ini
