@@ -7,6 +7,7 @@ from typing import Any
 import pandas as pd
 
 from core.analyzer import AuditAnalyzer
+from core.supplemental_control_map import filter_ini_defaults_for_supplemental
 from DataClasses import Finding
 
 from src.persistence.controls_catalog_loader import load_controls_catalog
@@ -106,12 +107,12 @@ def run_supplemental_analyzer_checks(
 ) -> list[Finding]:
     """Legacy analyzer checks not yet covered by Sprint-1 validators."""
     config = deepcopy(settings)
-    # AL-01 already covers global_auditing_state; keep other INI hardening here.
-    config["ini_security_defaults"] = [
-        entry
-        for entry in config.get("ini_security_defaults", [])
-        if str(entry.get("key", "")).strip().lower() != "global_auditing_state"
-    ]
+    # AL-01 covers global_auditing_state; PP-01 covers password INI keys when implemented.
+    config["ini_security_defaults"] = filter_ini_defaults_for_supplemental(
+        list(config.get("ini_security_defaults", []) or []),
+        skip_pp01_keys=is_control_implemented("DB-PP-01_PLACEHOLDER"),
+        skip_global_auditing_state=True,
+    )
 
     analyzer = AuditAnalyzer(config=config, whitelist=whitelist)
 

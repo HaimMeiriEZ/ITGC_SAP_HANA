@@ -7,9 +7,12 @@ import pytest
 
 from src.config import SAMPLES_DIR, SLOT_KEYS
 from src.persistence.controls_catalog_loader import (
+    get_control_in_scope,
     get_placeholder_controls,
     load_and_apply_catalog,
+    load_catalog,
     load_controls_catalog,
+    save_catalog,
 )
 from src.pipeline import (
     get_controls_catalog_summary,
@@ -125,6 +128,60 @@ def test_controls_catalog_summary_for_ui():
     summary = get_controls_catalog_summary()
     assert len(summary) == 11
     assert all(row["status"] == "Implemented" for row in summary)
+    assert all("control_id_ayalon" in row for row in summary)
+    assert all("description" in row for row in summary)
+    assert all("risk_description" in row for row in summary)
+    am01 = next(row for row in summary if row["control_id"] == "DB-AM-01_PLACEHOLDER")
+    assert am01["control_id_ayalon"] == "DB-AM-01_01_01_05_72"
+    assert am01["description"]
+    assert am01["risk_description"]
+    assert am01["notify_technical"] is True
+    assert am01["notify_business"] is True
+    pp01 = next(row for row in summary if row["control_id"] == "DB-PP-01_PLACEHOLDER")
+    assert pp01["notify_technical"] is True
+    assert pp01["notify_business"] is False
+
+
+def test_save_catalog_roundtrip(tmp_path: Path):
+    source_controls = load_catalog()
+    assert source_controls
+    target_dir = tmp_path / "knowledge_base"
+    # Copy-like write of current catalog then mutate and reload
+    save_catalog(source_controls, knowledge_base_dir=target_dir)
+    loaded = load_catalog(knowledge_base_dir=target_dir)
+    assert len(loaded) == len(source_controls)
+
+    for item in loaded:
+        if str(item.get("control_id")) == "DB-AM-01_PLACEHOLDER":
+            item["control_id_ayalon"] = "TEST-AYALON-ID"
+            item["description"] = "תיאור בדיקה"
+            item["risk_description"] = "סיכון בדיקה"
+            break
+    save_catalog(loaded, knowledge_base_dir=target_dir)
+
+    reloaded = load_controls_catalog(knowledge_base_dir=target_dir)
+    entry = reloaded["DB-AM-01_PLACEHOLDER"]
+    assert entry["control_id_ayalon"] == "TEST-AYALON-ID"
+    assert entry["description"] == "תיאור בדיקה"
+    assert entry["risk_description"] == "סיכון בדיקה"
+
+
+def test_save_catalog_in_scope_false_roundtrip(tmp_path: Path):
+    source_controls = load_catalog()
+    assert source_controls
+    target_dir = tmp_path / "knowledge_base"
+    save_catalog(source_controls, knowledge_base_dir=target_dir)
+
+    loaded = load_catalog(knowledge_base_dir=target_dir)
+    for item in loaded:
+        if str(item.get("control_id")) == "DB-AL-01_PLACEHOLDER":
+            item["in_scope"] = False
+            break
+    save_catalog(loaded, knowledge_base_dir=target_dir)
+
+    assert get_control_in_scope("DB-AL-01_PLACEHOLDER", knowledge_base_dir=target_dir) is False
+    reloaded = load_controls_catalog(knowledge_base_dir=target_dir)
+    assert reloaded["DB-AL-01_PLACEHOLDER"]["in_scope"] is False
 
 
 def test_catalog_merge_json_and_spec_rules():

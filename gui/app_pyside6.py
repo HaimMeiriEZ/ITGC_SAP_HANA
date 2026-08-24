@@ -1,6 +1,7 @@
 import copy
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -15,6 +16,7 @@ from PySide6.QtCore import QDate, Qt
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDateEdit,
@@ -22,6 +24,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -39,6 +42,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
     QHeaderView,
@@ -70,6 +74,7 @@ try:
         aggregate_findings_by_control,
         build_summary_row_values,
         details_by_control,
+        display_control_id,
         ensure_finding_control_id,
         sorted_summary_rows,
     )
@@ -80,7 +85,18 @@ try:
         primary_slot_for_control,
     )
     from src.reporting.working_paper_report import safe_working_paper_filename, write_control_working_paper
-    from src.persistence.controls_catalog_loader import load_controls_catalog
+    from src.persistence.controls_catalog_loader import (
+        load_and_apply_catalog,
+        load_catalog,
+        load_controls_catalog,
+        save_catalog,
+    )
+    from core.compensating_control_repository import CompensatingControlRepository
+    from core.compensating_control_service import (
+        build_compensating_control_rows,
+        DEFAULT_COMPENSATING_COLUMN_WIDTHS,
+        DEFAULT_COMPENSATING_ROW_HEIGHT,
+    )
     from src.pipeline import get_controls_catalog_summary, run_audit_analysis
     from src.readers.hana_export_reader import read_hana_export
 except ImportError as e:
@@ -410,6 +426,8 @@ class AuditGUI:
             "Technical": ["_SYS", "SYSTEM", "TECH", "SERVICE", "BATCH", "ADMIN"],
             "Application": [],
         },
+        "technical_owner_email": "",
+        "business_owner_email": "",
     }
 
     def __init__(self, root=None):
@@ -417,7 +435,7 @@ class AuditGUI:
         self.app.setLayoutDirection(Qt.RightToLeft)
 
         self.window = root if isinstance(root, QMainWindow) else QMainWindow()
-        self.window.setWindowTitle("מערכת ביקורת SAP HANA ITGC - PySide6")
+        self.window.setWindowTitle("כלי להערכת בקרות ITGC בסביבת SAP HANA DB")
         self.window.resize(1150, 900)
         self.window.setMinimumSize(1050, 800)
         self.window.setStyleSheet(
@@ -446,7 +464,34 @@ class AuditGUI:
                 border-radius: 4px;
                 padding: 4px;
             }
+            QTableWidget::item:selected {
+                background-color: #305496;
+                color: #ffffff;
+            }
+            QTableWidget::item:selected:active {
+                background-color: #305496;
+                color: #ffffff;
+            }
             QPushButton { padding: 6px 12px; }
+            QTabBar::tab {
+                background-color: #e9eef7;
+                color: #16325c;
+                border: 1px solid #b7c4d8;
+                border-bottom: none;
+                padding: 6px 12px;
+                margin-left: 2px;
+                min-width: 120px;
+                font-weight: bold;
+            }
+            QTabBar::tab:selected {
+                background-color: #700030;
+                color: white;
+            }
+            QTabWidget::pane {
+                border: 1px solid #c7cfda;
+                top: -1px;
+                background: #f8f9fa;
+            }
             """
         )
         self.support_logger = SupportLogger(log_dir=PROJECT_ROOT / "logs")
@@ -469,6 +514,12 @@ class AuditGUI:
         self.displayed_findings = []
         self.findings_summary_records = {}
         self.findings_details_by_control = {}
+        self.compensating_controls_repository = CompensatingControlRepository(
+            output_dir=PROJECT_ROOT / "data" / "output",
+            base_dir=PROJECT_ROOT,
+        )
+        self.compensating_controls_data = self.compensating_controls_repository.load()
+        self.compensating_controls_table: QTableWidget | None = None
         self.selected_finding_control_id = None
         self._suppress_findings_selection = False
         self.user_review_report = None
@@ -589,30 +640,84 @@ class AuditGUI:
         central = QWidget()
         self.window.setCentralWidget(central)
         layout = QVBoxLayout(central)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(10)
+
+        title_container = QWidget()
+        title_container.setLayoutDirection(Qt.LeftToRight)
+        title_row = QHBoxLayout(title_container)
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(12)
+
+        logo_path = Path(__file__).resolve().parent / "assets" / "ayalon_logo.png"
+        if logo_path.exists():
+            logo_pixmap = QPixmap(str(logo_path))
+            if not logo_pixmap.isNull():
+                logo_label = QLabel()
+                logo_label.setPixmap(logo_pixmap.scaledToHeight(36, Qt.SmoothTransformation))
+                logo_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                logo_label.setContentsMargins(0, 0, 0, 0)
+                title_row.addWidget(logo_label)
+
+        title_row.addStretch(1)
+        self.app_title_label = QLabel("כלי להערכת בקרות ITGC בסביבת SAP HANA DB")
+        self.app_title_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #16325c;")
+        self.app_title_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        title_row.addWidget(self.app_title_label)
+        layout.addWidget(title_container)
 
         self.notebook = QTabWidget()
+        self.notebook.setLayoutDirection(Qt.RightToLeft)
+        self.notebook.setDocumentMode(True)
+        self.notebook.setMovable(False)
         layout.addWidget(self.notebook)
 
+        self.controls_catalog_tab = QWidget()
+        self.settings_tab = QWidget()
         self.import_tab = QWidget()
         self.user_review_tab = QWidget()
         self.audit_tab = QWidget()
-        self.controls_catalog_tab = QWidget()
-        self.settings_tab = QWidget()
+        self.compensating_controls_tab = QWidget()
 
+        self.notebook.addTab(self.controls_catalog_tab, "רשימת בקרות לניתוח")
+        self.notebook.addTab(self.settings_tab, "הגדרות מערכת")
         self.notebook.addTab(self.import_tab, "טעינת נתונים (IPE)")
         self.notebook.addTab(self.user_review_tab, "דוח סקירת משתמשים")
         self.notebook.addTab(self.audit_tab, "ניתוח וממצאים")
-        self.notebook.addTab(self.controls_catalog_tab, "רשימת בקרות לניתוח")
-        self.notebook.addTab(self.settings_tab, "הגדרות מערכת")
+        self.notebook.addTab(self.compensating_controls_tab, "בקרות מפצות")
 
+        self._build_controls_catalog_tab()
+        self._build_settings_tab()
         self._build_import_tab()
         self._build_user_review_tab()
         self._build_audit_tab()
-        self._build_controls_catalog_tab()
-        self._build_settings_tab()
+        self._build_compensating_controls_tab()
+
+    @staticmethod
+    def _make_section_title(text: str, *, word_wrap: bool = False) -> QLabel:
+        title = QLabel(text)
+        title.setProperty("class", "section")
+        title.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        if word_wrap:
+            title.setWordWrap(True)
+        return title
 
     def _rtl_hebrew_only(self, text):
         return "" if text is None else str(text)
+
+    @staticmethod
+    def _style_wrapping_action_button(button: QPushButton) -> None:
+        button.setMinimumHeight(52)
+        button.setMinimumWidth(170)
+        button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        button.setStyleSheet(
+            """
+            QPushButton {
+                padding: 8px 14px;
+                text-align: center;
+            }
+            """
+        )
 
     def _build_import_tab(self):
         outer_layout = QVBoxLayout(self.import_tab)
@@ -626,14 +731,12 @@ class AuditGUI:
         layout.setSpacing(10)
 
         header_layout = QHBoxLayout()
-        title = QLabel("ניהול מקורות מידע ומהימנות נתונים (IPE)")
-        title.setProperty("class", "section")
-        title.setWordWrap(True)
+        title = self._make_section_title("ניהול מקורות מידע ומהימנות נתונים (IPE)", word_wrap=True)
         self.export_ipe_btn = QPushButton("ייצוא לוג IPE ל-Excel")
         self.export_ipe_btn.clicked.connect(self._export_ipe_log)
-        header_layout.addWidget(self.export_ipe_btn)
-        header_layout.addStretch(1)
         header_layout.addWidget(title)
+        header_layout.addStretch(1)
+        header_layout.addWidget(self.export_ipe_btn)
         layout.addLayout(header_layout)
 
         slots = [
@@ -739,8 +842,7 @@ class AuditGUI:
         layout = QVBoxLayout(self.user_review_tab)
 
         header_layout = QHBoxLayout()
-        title = QLabel("דוח סקירת משתמשים למנהלים")
-        title.setProperty("class", "section")
+        title = self._make_section_title("דוח סקירת משתמשים למנהלים")
 
         self.export_review_pdf_btn = QPushButton("ייצוא ל-PDF")
         self.export_review_pdf_btn.clicked.connect(self._export_user_review_pdf)
@@ -748,6 +850,12 @@ class AuditGUI:
         self.export_review_excel_btn.clicked.connect(self._export_user_review_excel)
         self.import_review_excel_btn = QPushButton("ייבוא סקירה מאקסל")
         self.import_review_excel_btn.clicked.connect(self._import_user_review_excel)
+        self.email_review_technical_btn = QPushButton("שליחה במייל\nלגורם טכנולוגי")
+        self.email_review_technical_btn.clicked.connect(self._draft_user_review_email_to_technical)
+        self._style_wrapping_action_button(self.email_review_technical_btn)
+        self.email_review_business_btn = QPushButton("שליחה במייל\nלגורם עסקי")
+        self.email_review_business_btn.clicked.connect(self._draft_user_review_email_to_business)
+        self._style_wrapping_action_button(self.email_review_business_btn)
         self.generate_review_btn = QPushButton("בנה דוח סקירה")
         self.generate_review_btn.clicked.connect(self._generate_user_review)
 
@@ -761,6 +869,8 @@ class AuditGUI:
         self.review_date_var = SimpleVar(self._get_today_date())
         self.review_date_widget.dateChanged.connect(lambda value: self.review_date_var.set(value.toPython().isoformat()))
 
+        header_layout.addWidget(title)
+        header_layout.addStretch(1)
         for widget in [
             self.export_review_pdf_btn,
             self.export_review_excel_btn,
@@ -770,9 +880,13 @@ class AuditGUI:
             self.review_date_widget,
         ]:
             header_layout.addWidget(widget)
-        header_layout.addStretch(1)
-        header_layout.addWidget(title)
         layout.addLayout(header_layout)
+
+        email_row = QHBoxLayout()
+        email_row.addWidget(self.email_review_technical_btn)
+        email_row.addWidget(self.email_review_business_btn)
+        email_row.addStretch(1)
+        layout.addLayout(email_row)
 
         self.review_period_info_label = QLabel("טווח בחינה: -")
         self.review_period_info_label.setProperty("class", "hint")
@@ -788,8 +902,10 @@ class AuditGUI:
         filter_layout.addStretch(1)
         layout.addLayout(filter_layout)
 
-        progress_box = QGroupBox("סיכום התקדמות סקירה")
-        progress_layout = QVBoxLayout(progress_box)
+        progress_content = QWidget()
+        progress_layout = QVBoxLayout(progress_content)
+        progress_layout.setContentsMargins(0, 0, 0, 0)
+        progress_layout.setSpacing(6)
         counts_row = QHBoxLayout()
         self.user_review_total_label = QLabel('סה"כ משתמשים בדוח: 0')
         self.user_review_total_label.setStyleSheet("font-weight: bold;")
@@ -821,10 +937,12 @@ class AuditGUI:
         self.user_review_progress_percent_label = QLabel("התקדמות השלמת סקירה: 0%")
         self.user_review_progress_percent_label.setStyleSheet("font-weight: bold; color: #0d47a1;")
         progress_layout.addWidget(self.user_review_progress_percent_label)
-        layout.addWidget(progress_box)
+        layout.addWidget(self._make_collapsible_section("סיכום התקדמות סקירה", progress_content))
 
-        info_box = QGroupBox("מטא-דאטה ותקציר")
-        info_layout = QVBoxLayout(info_box)
+        info_content = QWidget()
+        info_layout = QVBoxLayout(info_content)
+        info_layout.setContentsMargins(0, 0, 0, 0)
+        info_layout.setSpacing(6)
         summary_layout = QHBoxLayout()
         self.review_summary_labels = {}
         summary_items = [
@@ -835,6 +953,7 @@ class AuditGUI:
         ]
         for label_text, key in summary_items:
             cell = QVBoxLayout()
+            cell.setSpacing(2)
             label = QLabel(label_text)
             value_label = QLabel("0")
             value_label.setStyleSheet("font-size: 16px; font-weight: 700;")
@@ -852,11 +971,16 @@ class AuditGUI:
         self.user_type_tree = QTableWidget(0, 2)
         self.user_type_tree.setHorizontalHeaderLabels(["סוג משתמש", "כמות"])
         self._configure_table(self.user_type_tree)
+        self.user_type_tree.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        self.user_type_tree.verticalHeader().setDefaultSectionSize(24)
+        self.user_type_tree.setMaximumHeight(110)
+        self._fit_user_type_tree_height()
         info_layout.addWidget(self.user_type_tree)
-        layout.addWidget(info_box)
+        layout.addWidget(self._make_collapsible_section("מטא-דאטה ותקציר", info_content))
 
-        report_box = QGroupBox("רשימת משתמשים לסקירה")
-        report_layout = QVBoxLayout(report_box)
+        report_content = QWidget()
+        report_layout = QVBoxLayout(report_content)
+        report_layout.setContentsMargins(0, 0, 0, 0)
         self.user_review_columns = [
             "user_name", "in_scope", "active_status", "active_in_period", "last_login", "days_since_login", "user_type",
             "password_policy_exempt_status", "password_policy_exempt_reason", "system_table_access_status", "critical_privileges", "has_exception", "exception_reason", "review_status", "manager_decision",
@@ -873,14 +997,102 @@ class AuditGUI:
         self.user_review_tree.itemSelectionChanged.connect(self._handle_user_review_selection)
         self.user_review_tree.cellDoubleClicked.connect(self._on_user_review_double_clicked)
         report_layout.addWidget(self.user_review_tree)
-        layout.addWidget(report_box, 1)
+        layout.addWidget(
+            self._make_collapsible_section(
+                "רשימת משתמשים לסקירה",
+                report_content,
+                stretch_body=True,
+            ),
+            1,
+        )
+
+    def _make_collapsible_section(
+        self,
+        title: str,
+        content: QWidget,
+        *,
+        collapsed: bool = False,
+        stretch_body: bool = False,
+    ) -> QWidget:
+        container = QWidget()
+        container.setLayoutDirection(Qt.RightToLeft)
+        outer = QVBoxLayout(container)
+        outer.setContentsMargins(0, 4, 0, 4)
+        outer.setSpacing(0)
+
+        toggle = QToolButton()
+        toggle.setText(title)
+        toggle.setCheckable(True)
+        toggle.setChecked(not collapsed)
+        toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        toggle.setArrowType(Qt.DownArrow if not collapsed else Qt.LeftArrow)
+        toggle.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        toggle.setCursor(Qt.PointingHandCursor)
+        toggle.setStyleSheet(
+            """
+            QToolButton {
+                border: 1px solid #cfd6de;
+                border-radius: 6px;
+                background-color: #eef3fb;
+                padding: 8px 12px;
+                font-weight: 700;
+                font-size: 13px;
+                color: #1f2d3d;
+                text-align: right;
+            }
+            QToolButton:hover {
+                background-color: #e0eaf8;
+            }
+            QToolButton:checked {
+                border-bottom-left-radius: 0;
+                border-bottom-right-radius: 0;
+            }
+            """
+        )
+
+        body = QFrame()
+        body.setObjectName("collapsibleBody")
+        body.setStyleSheet(
+            """
+            QFrame#collapsibleBody {
+                border: 1px solid #cfd6de;
+                border-top: none;
+                border-bottom-left-radius: 6px;
+                border-bottom-right-radius: 6px;
+                background-color: #f8f9fa;
+            }
+            """
+        )
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(10, 8, 10, 10)
+        body_layout.setSpacing(6)
+        body_layout.addWidget(content)
+        body.setVisible(not collapsed)
+
+        def _on_toggled(checked: bool) -> None:
+            body.setVisible(checked)
+            toggle.setArrowType(Qt.DownArrow if checked else Qt.LeftArrow)
+
+        toggle.toggled.connect(_on_toggled)
+        outer.addWidget(toggle)
+        outer.addWidget(body, 1 if stretch_body else 0)
+        return container
+
+    def _fit_user_type_tree_height(self) -> None:
+        table = getattr(self, "user_type_tree", None)
+        if table is None:
+            return
+        rows = max(table.rowCount(), 1)
+        header_h = max(table.horizontalHeader().height(), 28)
+        row_h = max(table.verticalHeader().defaultSectionSize(), 24)
+        height = header_h + (row_h * rows) + 6
+        table.setFixedHeight(min(max(height, 56), 110))
 
     def _build_audit_tab(self):
         layout = QVBoxLayout(self.audit_tab)
 
         ctrl_layout = QHBoxLayout()
-        title = QLabel("ביצוע ניתוח בקרות ITGC")
-        title.setProperty("class", "section")
+        title = self._make_section_title("ביצוע ניתוח בקרות ITGC")
         self.export_findings_btn = QPushButton("ייצוא ממצאים ל-Excel")
         self.export_findings_btn.clicked.connect(self._export_findings_to_excel)
         self.open_logs_btn = QPushButton("פתח תיקיית לוגים")
@@ -893,10 +1105,10 @@ class AuditGUI:
         self.period_input.setMaximumWidth(120)
         self.period_input.textChanged.connect(self.period_var.set)
 
+        ctrl_layout.addWidget(title)
+        ctrl_layout.addStretch(1)
         for widget in [self.export_findings_btn, self.open_logs_btn, self.run_btn, QLabel("תקופה:"), self.period_input]:
             ctrl_layout.addWidget(widget)
-        ctrl_layout.addStretch(1)
-        ctrl_layout.addWidget(title)
         layout.addLayout(ctrl_layout)
 
         filter_box = QGroupBox("סינון מהיר")
@@ -950,6 +1162,7 @@ class AuditGUI:
         self.findings_summary_table.setHorizontalHeaderLabels(summary_headers)
         self._configure_table(self.findings_summary_table)
         self.findings_summary_table.setSortingEnabled(True)
+        self.findings_summary_finding_count_col = 5
         self.findings_summary_table.itemSelectionChanged.connect(self._refresh_selected_finding_detail)
         summary_layout.addWidget(self.findings_summary_table)
         splitter.addWidget(summary_box)
@@ -982,7 +1195,12 @@ class AuditGUI:
         layout.setSpacing(8)
 
         hint = QLabel(
-            "כל 11 הבקרות מחוברות ל-validators לפי הקטלוג."
+            "כל 11 הבקרות מחוברות ל-validators לפי הקטלוג. "
+            "לחיצה כפולה על שורה פותחת חלון עריכה. "
+            "מזהה הבקרה המוצג הוא control_id_ayalon (מפתח פנימי נשמר ברקע). "
+            "עמודות המייל נגזרות מהכתובות בהגדרות המערכת ומהסימון לכל בקרה "
+            "(גורם טכנולוגי / גורם עסקי / שניהם). "
+            "ניתן לגרור את גובה השורות משמאל כדי להרחיב ולראות תיאור מלא."
         )
         hint.setWordWrap(True)
         hint.setAlignment(Qt.AlignRight | Qt.AlignTop)
@@ -991,48 +1209,412 @@ class AuditGUI:
 
         self.controls_catalog_table = QTableWidget()
         self.controls_catalog_table.setLayoutDirection(Qt.RightToLeft)
-        headers = ["מזהה בקרה", "כותרת", "דומיין", "slots נדרשים", "סטטוס"]
+        headers = [
+            "מזהה בקרה",
+            "כותרת",
+            "בסקופ",
+            "תיאור הסיכון",
+            "תיאור הבקרה",
+            "גורם טכנולוגי",
+            "גורם עסקי",
+            "דומיין",
+            "slots נדרשים",
+            "סטטוס",
+        ]
         self.controls_catalog_table.setColumnCount(len(headers))
         self.controls_catalog_table.setHorizontalHeaderLabels(headers)
         self.controls_catalog_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.controls_catalog_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.controls_catalog_table.setAlternatingRowColors(True)
+        self.controls_catalog_table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.controls_catalog_table.setWordWrap(True)
+        self.controls_catalog_table.setTextElideMode(Qt.ElideNone)
         hdr = self.controls_catalog_table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.Interactive)
         hdr.setStretchLastSection(True)
-        self.controls_catalog_table.setColumnWidth(0, 220)
-        self.controls_catalog_table.setColumnWidth(1, 260)
-        self.controls_catalog_table.setColumnWidth(2, 120)
-        self.controls_catalog_table.setColumnWidth(3, 280)
-        self.controls_catalog_table.verticalHeader().setVisible(False)
+        hdr.setDefaultAlignment(Qt.AlignRight | Qt.AlignVCenter | Qt.AlignAbsolute)
+        self.controls_catalog_table.setColumnWidth(0, 160)
+        self.controls_catalog_table.setColumnWidth(1, 180)
+        self.controls_catalog_table.setColumnWidth(2, 70)
+        self.controls_catalog_table.setColumnWidth(3, 240)
+        self.controls_catalog_table.setColumnWidth(4, 280)
+        self.controls_catalog_table.setColumnWidth(5, 160)
+        self.controls_catalog_table.setColumnWidth(6, 160)
+        self.controls_catalog_table.setColumnWidth(7, 100)
+        self.controls_catalog_table.setColumnWidth(8, 180)
+        vhdr = self.controls_catalog_table.verticalHeader()
+        vhdr.setVisible(True)
+        vhdr.setSectionResizeMode(QHeaderView.Interactive)
+        vhdr.setDefaultSectionSize(72)
+        vhdr.setMinimumSectionSize(28)
+        self.controls_catalog_table.cellDoubleClicked.connect(self._on_catalog_row_double_clicked)
         layout.addWidget(self.controls_catalog_table, 1)
 
         btn_bar = QHBoxLayout()
         refresh_btn = QPushButton("רענון רשימה")
         refresh_btn.clicked.connect(self._refresh_controls_catalog_table)
+        expand_rows_btn = QPushButton("הרחב שורות לתיאור מלא")
+        expand_rows_btn.clicked.connect(self._expand_controls_catalog_rows)
+        collapse_rows_btn = QPushButton("כווץ שורות")
+        collapse_rows_btn.clicked.connect(self._collapse_controls_catalog_rows)
         btn_bar.addWidget(refresh_btn)
+        btn_bar.addWidget(expand_rows_btn)
+        btn_bar.addWidget(collapse_rows_btn)
         btn_bar.addStretch(1)
         layout.addLayout(btn_bar)
 
         self._refresh_controls_catalog_table()
 
+    def _expand_controls_catalog_rows(self):
+        if not hasattr(self, "controls_catalog_table"):
+            return
+        self.controls_catalog_table.resizeRowsToContents()
+
+    def _collapse_controls_catalog_rows(self):
+        if not hasattr(self, "controls_catalog_table"):
+            return
+        default_height = self.controls_catalog_table.verticalHeader().defaultSectionSize()
+        for row_idx in range(self.controls_catalog_table.rowCount()):
+            self.controls_catalog_table.setRowHeight(row_idx, default_height)
+
     def _refresh_controls_catalog_table(self):
         if not hasattr(self, "controls_catalog_table"):
             return
         rows = get_controls_catalog_summary()
+        tech_email = self._get_owner_email("technical")
+        biz_email = self._get_owner_email("business")
         self.controls_catalog_table.setRowCount(len(rows))
         for row_idx, entry in enumerate(rows):
+            control_id = str(entry.get("control_id", "") or "")
+            ayalon_id = str(entry.get("control_id_ayalon", "") or "").strip()
+            display_id = ayalon_id or control_id
+            risk_text = str(entry.get("risk_description", "") or "")
+            desc_text = str(entry.get("description", "") or "")
+            in_scope_raw = entry.get("in_scope", True)
+            if isinstance(in_scope_raw, str):
+                in_scope = in_scope_raw.strip().lower() not in {"false", "0", "no"}
+            else:
+                in_scope = bool(in_scope_raw)
+            scope_label = "כן" if in_scope else "לא"
+            notify_tech = bool(entry.get("notify_technical", False))
+            notify_biz = bool(entry.get("notify_business", False))
+            tech_display = tech_email if notify_tech and tech_email else ("כן" if notify_tech else "—")
+            biz_display = biz_email if notify_biz and biz_email else ("כן" if notify_biz else "—")
             values = [
-                entry.get("control_id", ""),
+                display_id,
                 self._rtl_hebrew_only(entry.get("title_he", "")),
+                scope_label,
+                self._rtl_hebrew_only(risk_text),
+                self._rtl_hebrew_only(desc_text),
+                tech_display,
+                biz_display,
                 entry.get("domain", ""),
                 entry.get("required_slots", ""),
                 entry.get("status", ""),
             ]
             for col_idx, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
-                item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                # AlignAbsolute: keep visual right alignment under RTL table layout.
+                item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter | Qt.AlignAbsolute)
+                if col_idx == 0:
+                    item.setData(Qt.UserRole, control_id)
+                    if ayalon_id and ayalon_id != control_id:
+                        item.setToolTip(f"מזהה פנימי: {control_id}")
+                elif col_idx == 2:
+                    # Background tint only — ForegroundRole would override selected white text.
+                    item.setBackground(QColor("#d4edda" if in_scope else "#f8d7da"))
+                elif col_idx in (3, 4):
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignTop | Qt.AlignAbsolute)
+                    if value:
+                        item.setToolTip(str(value))
+                elif col_idx == 5:
+                    if notify_tech:
+                        item.setToolTip(tech_email or "כתובת מייל לגורם טכנולוגי תוגדר בהגדרות מערכת")
+                elif col_idx == 6:
+                    if notify_biz:
+                        item.setToolTip(biz_email or "כתובת מייל לגורם עסקי תוגדר בהגדרות מערכת")
                 self.controls_catalog_table.setItem(row_idx, col_idx, item)
+        self.controls_catalog_table.resizeRowsToContents()
+
+    def _on_catalog_row_double_clicked(self, row: int, _column: int):
+        item = self.controls_catalog_table.item(row, 0)
+        if item is None:
+            return
+        control_id = item.data(Qt.UserRole) or item.text()
+        if control_id:
+            self._show_control_edit_dialog(str(control_id))
+
+    def _show_control_edit_dialog(self, control_id: str):
+        catalog = load_controls_catalog()
+        entry = catalog.get(control_id)
+        if entry is None:
+            self._show_warning("אין נתונים", f"לא נמצאה בקרה {control_id} בקטלוג.")
+            return
+
+        dlg = QDialog(self.window)
+        dlg.setWindowTitle(f"עריכת בקרה — {control_id}")
+        dlg.setLayoutDirection(Qt.RightToLeft)
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumWidth(580)
+        dlg.resize(640, 620)
+
+        dlg_layout = QVBoxLayout(dlg)
+        dlg_layout.setContentsMargins(16, 14, 16, 14)
+        dlg_layout.setSpacing(6)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        form_widget = QWidget()
+        form_widget.setLayoutDirection(Qt.RightToLeft)
+        form_layout = QFormLayout(form_widget)
+        form_layout.setLabelAlignment(Qt.AlignRight)
+        form_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        form_layout.setSpacing(10)
+        scroll.setWidget(form_widget)
+
+        def _ro(text: str) -> QLabel:
+            lbl = QLabel(f"<b>{text}</b>")
+            lbl.setStyleSheet("color: #555;")
+            lbl.setWordWrap(True)
+            lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            return lbl
+
+        required_slots = entry.get("required_slots") or []
+        if isinstance(required_slots, list):
+            slots_text = ", ".join(str(s) for s in required_slots)
+        else:
+            slots_text = str(required_slots or "")
+
+        form_layout.addRow("מזהה פנימי:", _ro(control_id))
+        form_layout.addRow("דומיין:", _ro(str(entry.get("domain", "") or "-")))
+        form_layout.addRow("slots נדרשים:", _ro(slots_text or "-"))
+        form_layout.addRow(
+            "סטטוס מימוש:",
+            _ro(str(entry.get("implementation_status", "") or "-")),
+        )
+        form_layout.addRow(
+            "validator_ref:",
+            _ro(str(entry.get("validator_ref", "") or "-")),
+        )
+
+        ayalon_edit = QLineEdit(str(entry.get("control_id_ayalon", "") or ""))
+        ayalon_edit.setLayoutDirection(Qt.RightToLeft)
+        form_layout.addRow("מזהה Ayalon:", ayalon_edit)
+
+        title_edit = QLineEdit(str(entry.get("title_he", "") or ""))
+        title_edit.setLayoutDirection(Qt.RightToLeft)
+        form_layout.addRow("כותרת:", title_edit)
+
+        process_edit = QLineEdit(str(entry.get("process", "") or ""))
+        process_edit.setLayoutDirection(Qt.RightToLeft)
+        form_layout.addRow("תהליך:", process_edit)
+
+        in_scope_raw = entry.get("in_scope", True)
+        if isinstance(in_scope_raw, str):
+            in_scope_checked = in_scope_raw.strip().lower() not in {"false", "0", "no"}
+        else:
+            in_scope_checked = bool(in_scope_raw)
+
+        scope_box = QGroupBox("בסקופ לביקורת")
+        scope_box.setLayoutDirection(Qt.RightToLeft)
+        scope_box.setStyleSheet(self._catalog_edit_group_stylesheet())
+        scope_layout = QHBoxLayout(scope_box)
+        scope_layout.setContentsMargins(8, 12, 8, 8)
+        scope_layout.setSpacing(10)
+        scope_yes_radio = self._make_filled_radio("כן — כלול בניתוח ובממצאים")
+        scope_no_radio = self._make_filled_radio("לא — מחוץ לסקופ (לא ינותח)")
+        scope_group = QButtonGroup(dlg)
+        scope_group.setExclusive(True)
+        scope_group.addButton(scope_yes_radio)
+        scope_group.addButton(scope_no_radio)
+        if in_scope_checked:
+            scope_yes_radio.setChecked(True)
+        else:
+            scope_no_radio.setChecked(True)
+        scope_layout.addWidget(scope_yes_radio, 1)
+        scope_layout.addWidget(scope_no_radio, 1)
+        form_layout.addRow(scope_box)
+
+        notify_tech_raw = entry.get("notify_technical", False)
+        notify_biz_raw = entry.get("notify_business", False)
+        if isinstance(notify_tech_raw, str):
+            notify_tech_checked = notify_tech_raw.strip().lower() not in {"false", "0", "no"}
+        else:
+            notify_tech_checked = bool(notify_tech_raw)
+        if isinstance(notify_biz_raw, str):
+            notify_biz_checked = notify_biz_raw.strip().lower() not in {"false", "0", "no"}
+        else:
+            notify_biz_checked = bool(notify_biz_raw)
+
+        recipients_box = QGroupBox("נמעני דיווח (מייל)")
+        recipients_box.setLayoutDirection(Qt.RightToLeft)
+        recipients_box.setStyleSheet(self._catalog_edit_group_stylesheet())
+        recipients_layout = QVBoxLayout(recipients_box)
+        recipients_layout.setContentsMargins(8, 12, 8, 8)
+        recipients_layout.setSpacing(8)
+        tech_email = self._get_owner_email("technical") or "(לא הוגדר בהגדרות מערכת)"
+        biz_email = self._get_owner_email("business") or "(לא הוגדר בהגדרות מערכת)"
+        notify_tech_radio = self._make_filled_radio(f"גורם טכנולוגי — {tech_email}")
+        notify_biz_radio = self._make_filled_radio(f"גורם עסקי — {biz_email}")
+        notify_both_radio = self._make_filled_radio("שניהם — טכנולוגי ועסקי")
+        notify_none_radio = self._make_filled_radio("ללא נמען")
+        recipients_group = QButtonGroup(dlg)
+        recipients_group.setExclusive(True)
+        for radio in (
+            notify_tech_radio,
+            notify_biz_radio,
+            notify_both_radio,
+            notify_none_radio,
+        ):
+            recipients_group.addButton(radio)
+            recipients_layout.addWidget(radio)
+        if notify_tech_checked and notify_biz_checked:
+            notify_both_radio.setChecked(True)
+        elif notify_tech_checked:
+            notify_tech_radio.setChecked(True)
+        elif notify_biz_checked:
+            notify_biz_radio.setChecked(True)
+        else:
+            notify_none_radio.setChecked(True)
+        recipients_hint = QLabel(
+            "הכתובות נלקחות מהגדרות המערכת. בחירה בכחול = נבחר; רקע לבן = לא נבחר."
+        )
+        recipients_hint.setWordWrap(True)
+        recipients_hint.setStyleSheet("color: #666; font-size: 11px;")
+        recipients_layout.addWidget(recipients_hint)
+        form_layout.addRow(recipients_box)
+
+        risk_edit = QTextEdit()
+        risk_edit.setLayoutDirection(Qt.RightToLeft)
+        risk_edit.setPlainText(str(entry.get("risk_description", "") or ""))
+        risk_edit.setMinimumHeight(70)
+        risk_edit.setMaximumHeight(110)
+        form_layout.addRow("תיאור הסיכון:", risk_edit)
+
+        desc_edit = QTextEdit()
+        desc_edit.setLayoutDirection(Qt.RightToLeft)
+        desc_edit.setPlainText(str(entry.get("description", "") or ""))
+        desc_edit.setMinimumHeight(70)
+        desc_edit.setMaximumHeight(110)
+        form_layout.addRow("תיאור הבקרה:", desc_edit)
+
+        steps_edit = QTextEdit()
+        steps_edit.setLayoutDirection(Qt.RightToLeft)
+        steps_edit.setPlainText(str(entry.get("test_steps_override", "") or ""))
+        steps_edit.setMinimumHeight(60)
+        steps_edit.setMaximumHeight(100)
+        form_layout.addRow("צעדי טסט:", steps_edit)
+
+        notes_edit = QLineEdit(str(entry.get("notes", "") or ""))
+        notes_edit.setLayoutDirection(Qt.RightToLeft)
+        form_layout.addRow("הערות:", notes_edit)
+
+        dlg_layout.addWidget(scroll, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Save).setText("שמירה")
+        buttons.button(QDialogButtonBox.Cancel).setText("ביטול")
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        dlg_layout.addWidget(buttons)
+
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        try:
+            controls = load_catalog()
+            updated = False
+            for item in controls:
+                if str(item.get("control_id", "")).strip() == control_id:
+                    item["control_id_ayalon"] = ayalon_edit.text().strip()
+                    item["title_he"] = title_edit.text().strip()
+                    item["process"] = process_edit.text().strip()
+                    item["risk_description"] = risk_edit.toPlainText().strip()
+                    item["description"] = desc_edit.toPlainText().strip()
+                    item["test_steps_override"] = steps_edit.toPlainText().strip()
+                    item["notes"] = notes_edit.text().strip()
+                    item["in_scope"] = bool(scope_yes_radio.isChecked())
+                    if notify_both_radio.isChecked():
+                        item["notify_technical"] = True
+                        item["notify_business"] = True
+                    elif notify_tech_radio.isChecked():
+                        item["notify_technical"] = True
+                        item["notify_business"] = False
+                    elif notify_biz_radio.isChecked():
+                        item["notify_technical"] = False
+                        item["notify_business"] = True
+                    else:
+                        item["notify_technical"] = False
+                        item["notify_business"] = False
+                    updated = True
+                    break
+            if not updated:
+                self._show_warning("אין נתונים", f"לא נמצאה רשומה לעדכון עבור {control_id}.")
+                return
+            save_catalog(controls)
+            load_and_apply_catalog()
+            self._refresh_controls_catalog_table()
+            self._show_info("הצלחה", f"הבקרה {control_id} נשמרה בקטלוג.")
+            self._log("עודכן קטלוג בקרות", control_id=control_id)
+        except Exception as error:
+            self._show_error("שגיאת שמירה", f"לא ניתן לשמור את הבקרה.\n\n{error}")
+
+    @staticmethod
+    def _catalog_edit_group_stylesheet() -> str:
+        return """
+            QGroupBox {
+                font-weight: 700;
+                color: #1f2d3d;
+                border: 2px solid #305496;
+                border-radius: 6px;
+                margin-top: 10px;
+                padding: 10px 8px 8px 8px;
+                background-color: #eef3fb;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top right;
+                padding: 0 8px;
+                background-color: #eef3fb;
+            }
+        """
+
+    @staticmethod
+    def _make_filled_radio(label: str) -> QPushButton:
+        """Exclusive choice button: blue fill + white text when selected, white when not."""
+        button = QPushButton(label)
+        button.setCheckable(True)
+        button.setAutoExclusive(False)
+        button.setLayoutDirection(Qt.RightToLeft)
+        button.setMinimumHeight(40)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setStyleSheet(
+            """
+            QPushButton {
+                text-align: right;
+                padding: 8px 14px;
+                border: 2px solid #305496;
+                border-radius: 6px;
+                background-color: #ffffff;
+                color: #1f2d3d;
+                font-size: 13px;
+            }
+            QPushButton:hover:!checked {
+                background-color: #e8eef8;
+            }
+            QPushButton:checked {
+                background-color: #305496;
+                color: #ffffff;
+                font-weight: 700;
+            }
+            QPushButton:pressed {
+                background-color: #264578;
+                color: #ffffff;
+            }
+            """
+        )
+        return button
 
     def _build_settings_tab(self):
         outer_layout = QVBoxLayout(self.settings_tab)
@@ -1045,13 +1627,12 @@ class AuditGUI:
         layout = QVBoxLayout(container)
         layout.setSpacing(12)
 
-        title = QLabel("הגדרות מערכת לביקורת")
-        title.setProperty("class", "section")
-        title.setWordWrap(True)
+        title = self._make_section_title("הגדרות מערכת לביקורת", word_wrap=True)
         layout.addWidget(title)
         hint = QLabel("הטופס מאפשר לעדכן את ההגדרות בצורה ידידותית ולשמור ישירות לקובץ ההגדרות.")
         hint.setProperty("class", "hint")
         hint.setWordWrap(True)
+        hint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         layout.addWidget(hint)
 
         btn_layout = QHBoxLayout()
@@ -1067,6 +1648,7 @@ class AuditGUI:
         btn_layout.addStretch(1)
         layout.addLayout(btn_layout)
 
+        layout.addWidget(self._build_notification_emails_section())
         layout.addWidget(self._build_review_period_section())
         layout.addWidget(self._build_text_list_section("critical_users", "משתמשים קריטיים", "רשימה מופרדת שורות"))
         layout.addWidget(self._build_text_list_section("critical_roles", "תפקידים קריטיים", "רשימה מופרדת שורות"))
@@ -1090,6 +1672,33 @@ class AuditGUI:
         threshold_layout.addLayout(threshold_form)
         layout.addWidget(threshold_box)
         layout.addStretch(1)
+
+    def _build_notification_emails_section(self):
+        box, layout = self._build_group_box(
+            "כתובות מייל לנמענים",
+            "כתובות אלה ישמשו ברשימת הבקרות ובשליחת דוח סקירת משתמשים "
+            "לגורם טכנולוגי או לגורם עסקי.",
+        )
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        form.setFormAlignment(Qt.AlignRight | Qt.AlignTop)
+        form.setHorizontalSpacing(16)
+
+        technical_email = QLineEdit()
+        technical_email.setPlaceholderText("example@company.com")
+        technical_email.setLayoutDirection(Qt.LeftToRight)
+        self.settings_widgets["technical_owner_email"] = technical_email
+        form.addRow("גורם טכנולוגי", technical_email)
+
+        business_email = QLineEdit()
+        business_email.setPlaceholderText("example@company.com")
+        business_email.setLayoutDirection(Qt.LeftToRight)
+        self.settings_widgets["business_owner_email"] = business_email
+        form.addRow("גורם עסקי", business_email)
+
+        layout.addLayout(form)
+        return box
 
     def _build_group_box(self, title, description=None):
         box = QGroupBox("")
@@ -1845,6 +2454,7 @@ class AuditGUI:
             for label in self.review_summary_labels.values():
                 label.setText("0")
             self.user_type_tree.setRowCount(0)
+            self._fit_user_type_tree_height()
             self._update_user_review_progress_summary()
             return
 
@@ -1857,6 +2467,7 @@ class AuditGUI:
         self.user_type_tree.setRowCount(0)
         for user_type, count in sorted(summary["type_distribution"].items()):
             self._set_table_row(self.user_type_tree, self.user_type_tree.rowCount(), [user_type, count])
+        self._fit_user_type_tree_height()
         self._update_user_review_progress_summary()
 
     def _update_user_review_progress_summary(self):
@@ -2123,6 +2734,9 @@ class AuditGUI:
                 item.setData(SortableTableWidgetItem.SORT_ROLE, self._summary_sort_key(source_index, value))
                 if target_col == 0:
                     item.setData(Qt.UserRole, control_id_value)
+                    display_id = str(row_data.get("control_id_display") or "")
+                    if display_id and display_id != control_id_value:
+                        item.setToolTip(f"מזהה פנימי: {control_id_value}")
                 risk = str(row_data.get("risk_level", ""))
                 if risk == "High":
                     item.setBackground(QColor("#f8d7da"))
@@ -2138,6 +2752,11 @@ class AuditGUI:
             self.findings_summary_table.setCellWidget(table_row, 7, wp_button)
 
         self.findings_summary_table.setSortingEnabled(was_sorting)
+        if was_sorting:
+            self.findings_summary_table.sortByColumn(
+                self.findings_summary_finding_count_col,
+                Qt.SortOrder.DescendingOrder,
+            )
         self._suppress_findings_selection = False
 
         target_row = 0
@@ -2241,11 +2860,14 @@ class AuditGUI:
             return
         try:
             export_rows = []
+            catalog = load_controls_catalog()
             for finding in export_findings:
                 ensure_finding_control_id(finding)
+                control_id = getattr(finding, "control_id", None) or "-"
                 export_rows.append(
                     {
-                        "מזהה בקרה": getattr(finding, "control_id", None) or "-",
+                        "מזהה בקרה": display_control_id(control_id, catalog.get(control_id, {})),
+                        "מזהה פנימי": control_id,
                         "קובץ מקור": self._get_source_file_name(finding),
                         "תאריך הפקה": getattr(finding, "extract_date", "-"),
                         "קטגוריה": finding.category,
@@ -2291,15 +2913,17 @@ class AuditGUI:
         dialog.resize(700, 520)
         layout = QVBoxLayout(dialog)
 
-        title = QLabel(finding.title)
-        title.setWordWrap(True)
-        title.setProperty("class", "section")
+        title = self._make_section_title(finding.title, word_wrap=True)
         layout.addWidget(title)
 
         form_box = QGroupBox("פרטי הממצא")
         form = QFormLayout(form_box)
+        catalog = load_controls_catalog()
+        finding_control_id = ensure_finding_control_id(finding)
+        finding_display_id = display_control_id(finding_control_id, catalog.get(finding_control_id, {}))
         detail_rows = [
-            ("מזהה בקרה", getattr(finding, "control_id", None)),
+            ("מזהה בקרה", finding_display_id),
+            ("מזהה פנימי", finding_control_id if finding_display_id != finding_control_id else None),
             ("קטגוריה", finding.category),
             ("רמת סיכון", finding.risk_level),
             ("סטטוס", finding.status),
@@ -2309,8 +2933,10 @@ class AuditGUI:
             ("ערך בפועל", getattr(finding, "actual_value", None)),
             ("ערך מצופה", getattr(finding, "expected_value", None)),
         ]
-        for label_text, value in detail_rows:
-            form.addRow(label_text, QLabel(self._format_finding_detail_value(value)))
+        for label, value in detail_rows:
+            if value is None:
+                continue
+            form.addRow(label, QLabel(self._format_finding_detail_value(value)))
         layout.addWidget(form_box)
 
         description_box = QGroupBox("תיאור מלא")
@@ -2374,6 +3000,130 @@ class AuditGUI:
             "user_name": getattr(finding, "actual_value", None),
         }
 
+    # ------------------------------------------------------------------
+    # טאב בקרות מפצות
+    # ------------------------------------------------------------------
+
+    def _build_compensating_controls_tab(self):
+        layout = QVBoxLayout(self.compensating_controls_tab)
+
+        header_layout = QHBoxLayout()
+        title = self._make_section_title("בקרות מפצות – בקרות בסקופ עם ממצאים", word_wrap=True)
+        refresh_btn = QPushButton("רענון רשימה")
+        refresh_btn.clicked.connect(self._refresh_compensating_controls_table)
+        header_layout.addWidget(title)
+        header_layout.addStretch(1)
+        header_layout.addWidget(refresh_btn)
+        layout.addLayout(header_layout)
+
+        headers = ["מספר בקרה", "תיאור הסיכון", "תיאור הבקרה", "סיכום ממצאים", "תיעוד בקרה מפצה"]
+        self.compensating_controls_table = QTableWidget()
+        self.compensating_controls_table.setLayoutDirection(Qt.RightToLeft)
+        self.compensating_controls_table.setColumnCount(len(headers))
+        self.compensating_controls_table.setHorizontalHeaderLabels(headers)
+        self.compensating_controls_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.compensating_controls_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.compensating_controls_table.setAlternatingRowColors(True)
+        col_widths = DEFAULT_COMPENSATING_COLUMN_WIDTHS
+        for col_idx, width in col_widths.items():
+            self.compensating_controls_table.setColumnWidth(int(col_idx), width)
+        hdr = self.compensating_controls_table.horizontalHeader()
+        hdr.setStretchLastSection(True)
+        self.compensating_controls_table.verticalHeader().setDefaultSectionSize(
+            DEFAULT_COMPENSATING_ROW_HEIGHT
+        )
+        layout.addWidget(self.compensating_controls_table)
+
+    def _refresh_compensating_controls_table(self):
+        if self.compensating_controls_table is None:
+            return
+        catalog = load_controls_catalog()
+
+        def get_meta(control_id: str) -> dict:
+            entry = catalog.get(control_id, {})
+            return {
+                "risk_description": entry.get("risk_description", "-"),
+                "description": entry.get("description", "-"),
+                "control_id_ayalon": entry.get("control_id_ayalon", ""),
+            }
+
+        def is_in_scope(control_id: str) -> bool:
+            return control_id in self.findings_summary_records
+
+        rows = build_compensating_control_rows(
+            summary_records=self.findings_summary_records,
+            details_by_control=self.findings_details_by_control,
+            compensating_state=self.compensating_controls_data,
+            get_meta_cb=get_meta,
+            is_in_scope_cb=is_in_scope,
+        )
+        table = self.compensating_controls_table
+        table.setRowCount(0)
+        for row_data in rows:
+            row_idx = table.rowCount()
+            table.insertRow(row_idx)
+            control_id_val = str(row_data["control_id"])
+            entry = catalog.get(control_id_val, {})
+            display_id = display_control_id(control_id_val, entry)
+            id_item = QTableWidgetItem(display_id)
+            id_item.setData(Qt.UserRole, control_id_val)
+            if display_id != control_id_val:
+                id_item.setToolTip(f"מזהה פנימי: {control_id_val}")
+            table.setItem(row_idx, 0, id_item)
+            table.setItem(row_idx, 1, QTableWidgetItem(str(row_data["risk_description"])))
+            table.setItem(row_idx, 2, QTableWidgetItem(str(row_data["description"])))
+            table.setItem(row_idx, 3, QTableWidgetItem(str(row_data["findings_brief"])))
+
+            attachment = row_data.get("attachment")
+            cell_widget = QWidget()
+            btn_layout = QHBoxLayout(cell_widget)
+            btn_layout.setContentsMargins(2, 2, 2, 2)
+            btn_layout.setSpacing(4)
+            if attachment:
+                fname = attachment.get("original_filename", "קובץ מצורף")
+                lbl = QLabel(fname)
+                lbl.setToolTip(str(attachment.get("stored_path", "")))
+                remove_btn = QPushButton("הסר")
+                remove_btn.setFixedWidth(54)
+                remove_btn.clicked.connect(
+                    lambda _checked=False, cid=control_id_val: self._remove_compensating_control(cid)
+                )
+                btn_layout.addWidget(remove_btn)
+                btn_layout.addWidget(lbl)
+            else:
+                upload_btn = QPushButton("העלאת קובץ")
+                upload_btn.clicked.connect(
+                    lambda _checked=False, cid=control_id_val: self._upload_compensating_control(cid)
+                )
+                btn_layout.addWidget(upload_btn)
+            btn_layout.addStretch(1)
+            table.setCellWidget(row_idx, 4, cell_widget)
+
+    def _upload_compensating_control(self, control_id: str):
+        path_str, _ = QFileDialog.getOpenFileName(
+            self.window, "בחר קובץ תיעוד", "", "כל הקבצים (*.*)"
+        )
+        if not path_str:
+            return
+        source = Path(path_str)
+        try:
+            self.compensating_controls_repository.attach_file(
+                control_id, source, self.compensating_controls_data
+            )
+            self._refresh_compensating_controls_table()
+            self._show_info("הצלחה", f"הקובץ {source.name} נשמר לבקרה {control_id}.")
+        except Exception as err:
+            self._show_error("שגיאת העלאה", str(err))
+
+    def _remove_compensating_control(self, control_id: str):
+        try:
+            self.compensating_controls_repository.remove_file(
+                control_id, self.compensating_controls_data
+            )
+            self._refresh_compensating_controls_table()
+        except Exception as err:
+            self._show_error("שגיאת הסרה", str(err))
+
     def _export_control_working_paper(self, control_id: str):
         if not control_id:
             return
@@ -2400,7 +3150,33 @@ class AuditGUI:
             note = "לא נטענה אוכלוסייה גולמית לסלוט הראשי של הבקרה."
 
         try:
-            write_control_working_paper(
+            # #region agent log
+            _cc_entry = self.compensating_controls_data.get(control_id)
+            try:
+                import json as _json_dbg
+                from time import time as _time_dbg
+                _dbg_path = Path(__file__).resolve().parents[1] / "debug-ef4f55.log"
+                with open(_dbg_path, "a", encoding="utf-8") as _dbg_f:
+                    _dbg_f.write(_json_dbg.dumps({
+                        "sessionId": "ef4f55",
+                        "runId": "post-fix",
+                        "hypothesisId": "A,B",
+                        "location": "app_pyside6.py:_export_control_working_paper",
+                        "message": "export compensating lookup",
+                        "data": {
+                            "control_id": control_id,
+                            "comp_keys": list(self.compensating_controls_data.keys()),
+                            "entry_found": _cc_entry is not None,
+                            "entry_filename": (_cc_entry or {}).get("original_filename"),
+                            "entry_stored_path": (_cc_entry or {}).get("stored_path"),
+                            "save_path": str(save_path),
+                        },
+                        "timestamp": int(_time_dbg() * 1000),
+                    }, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+            # #endregion
+            final_path = write_control_working_paper(
                 control_id=control_id,
                 catalog_entry=catalog.get(control_id, {}),
                 summary_record=summary_record,
@@ -2409,9 +3185,10 @@ class AuditGUI:
                 ipe_entries=self._ipe_entries_for_control(control_id),
                 output_path=Path(save_path),
                 raw_population_note=note,
+                compensating_control_entry=_cc_entry,
             )
-            self._show_info("הצלחה", f"נייר העבודה נשמר:\n{save_path}")
-            self._log("יוצא נייר עבודה", control_id=control_id, path=save_path)
+            self._show_info("הצלחה", f"נייר העבודה נשמר:\n{final_path}")
+            self._log("יוצא נייר עבודה", control_id=control_id, path=str(final_path))
         except Exception as error:
             self._show_error("שגיאת ייצוא", f"לא ניתן ליצור נייר עבודה.\n\n{error}")
 
@@ -2439,7 +3216,20 @@ class AuditGUI:
             )
             for warning in validator_warnings:
                 self._log(warning, period=self.period_var.get())
-            findings.extend(self._build_findings_from_user_review())
+            uar_findings = self._build_findings_from_user_review()
+            if not uar_findings:
+                # Keep prior UAR findings when the review report cannot be rebuilt this run.
+                uar_findings = [
+                    finding
+                    for finding in (self.current_findings or [])
+                    if (
+                        str(getattr(finding, "control_id", "") or "") == "DB-UAR-02_PLACEHOLDER"
+                        or str(getattr(finding, "category", "") or "") == "User Review"
+                        or str(getattr(finding, "comparison_rule", "") or "")
+                        == REVIEW_COMPLETION_COMPARISON_RULE
+                    )
+                ]
+            findings.extend(uar_findings)
             findings = self._attach_findings_source_metadata(findings)
             self.current_findings = findings
             self._capture_control_populations()
@@ -2448,6 +3238,7 @@ class AuditGUI:
             self.summary_vars["status"].set("הושלם")
             self._update_filter_options()
             self._refresh_findings_table()
+            self._refresh_compensating_controls_table()
             self._log("ניתוח ITGC הושלם", period=self.period_var.get(), findings_count=len(findings))
             self._show_info("הושלם", f"נמצאו {len(findings)} חריגות.")
         except Exception as e:
@@ -2562,6 +3353,8 @@ class AuditGUI:
         self.settings_widgets["critical_privileges"].setPlainText("\n".join(config.get("critical_privileges", [])))
         self.settings_widgets["audit_event_keywords"].setPlainText("\n".join(config.get("audit_event_keywords", [])))
         self.settings_widgets["inactive_days_threshold"].setText(str(config.get("inactive_days_threshold", 120)))
+        self.settings_widgets["technical_owner_email"].setText(str(config.get("technical_owner_email", "") or ""))
+        self.settings_widgets["business_owner_email"].setText(str(config.get("business_owner_email", "") or ""))
 
         period_cfg = config.get("user_review_period", {})
         self.settings_widgets["user_review_period.start_date"].setDate(QDate.fromString(period_cfg.get("start_date", self._get_today_date()), "yyyy-MM-dd"))
@@ -2670,6 +3463,8 @@ class AuditGUI:
             "audit_event_keywords": lines_from_editor(self.settings_widgets["audit_event_keywords"]),
             "ini_security_defaults": ini_security_defaults,
             "inactive_days_threshold": int(self.settings_widgets["inactive_days_threshold"].text().strip()),
+            "technical_owner_email": self.settings_widgets["technical_owner_email"].text().strip(),
+            "business_owner_email": self.settings_widgets["business_owner_email"].text().strip(),
             "user_review_period": {
                 "start_date": self.settings_widgets["user_review_period.start_date"].date().toPython().isoformat(),
                 "end_date": self.settings_widgets["user_review_period.end_date"].date().toPython().isoformat(),
@@ -2683,16 +3478,106 @@ class AuditGUI:
 
     def _save_settings(self):
         try:
-            config = self._collect_settings_from_form()
+            config = dict(self._current_config())
+            config.update(self._collect_settings_from_form())
             self.settings_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self.settings_path, "w", encoding="utf-8") as handle:
                 json.dump(config, handle, ensure_ascii=False, indent=4)
             if self.importer is not None:
                 self.importer.config = config
             self._update_review_period_info_label()
+            self._refresh_controls_catalog_table()
             self._show_info("הצלחה", "ההגדרות עודכנו.")
         except Exception as e:
             self._show_error("שגיאת הגדרות", str(e))
+
+    def _get_owner_email(self, owner_kind: str) -> str:
+        key = "technical_owner_email" if owner_kind == "technical" else "business_owner_email"
+        widget = self.settings_widgets.get(key)
+        if widget is not None:
+            return widget.text().strip()
+        return str(self._current_config().get(key, "") or "").strip()
+
+    @staticmethod
+    def _validate_email_address(email_value: str) -> bool:
+        normalized = email_value.strip()
+        return bool(normalized and "@" in normalized and "." in normalized.split("@")[-1])
+
+    def _draft_user_review_email_to_technical(self):
+        self._create_outlook_user_review_draft(
+            recipient_email=self._get_owner_email("technical"),
+            role_label="גורם טכנולוגי",
+        )
+
+    def _draft_user_review_email_to_business(self):
+        self._create_outlook_user_review_draft(
+            recipient_email=self._get_owner_email("business"),
+            role_label="גורם עסקי",
+        )
+
+    def _create_outlook_user_review_draft(self, recipient_email: str, role_label: str) -> None:
+        if not self._validate_email_address(recipient_email):
+            self._show_warning(
+                "מייל לא מוגדר",
+                f"לא הוגדרה כתובת מייל תקינה עבור {role_label} במסך הגדרות מערכת.",
+            )
+            return
+        if self.user_review_report is None or self.user_review_df.empty:
+            self._show_warning("אין נתונים", "בנה תחילה דוח סקירת משתמשים.")
+            return
+        if not sys.platform.startswith("win"):
+            self._show_warning("מערכת לא נתמכת", "יצירת טיוטת מייל נתמכת כרגע ב-Windows בלבד.")
+            return
+
+        output_dir = PROJECT_ROOT / "data" / "output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_role = re.sub(r"[^\w\-]+", "_", role_label, flags=re.UNICODE)
+        export_path = output_dir / f"User_Review_{safe_role}_{timestamp}.xlsx"
+        try:
+            self.user_review_report["dataframe"] = self.user_review_df.copy()
+            export_user_review_to_excel(self.user_review_report, str(export_path))
+        except Exception as error:
+            self._show_error("שגיאת ייצוא", f"לא ניתן לייצא את דוח הסקירה לצירוף למייל.\n\n{error}")
+            return
+
+        try:
+            import win32com.client  # type: ignore[import-not-found]
+        except ModuleNotFoundError:
+            install_command = f'"{sys.executable}" -m pip install pywin32'
+            self._show_warning(
+                "רכיב חסר ל-Outlook",
+                "לא ניתן ליצור טיוטת Outlook כי חסרה חבילת pywin32.\n\n"
+                f"יש להריץ פעם אחת בסביבת העבודה:\n{install_command}",
+            )
+            return
+        except Exception as error:
+            self._show_warning("Outlook לא זמין", f"לא ניתן לטעון Outlook COM ליצירת טיוטה:\n{error}")
+            return
+
+        try:
+            outlook = win32com.client.Dispatch("Outlook.Application")
+            mail_item = outlook.CreateItem(0)
+            mail_item.To = recipient_email
+            mail_item.Subject = f"סקירת דוח משתמשים - {datetime.now().strftime('%Y-%m-%d')}"
+            mail_item.HTMLBody = (
+                "<div dir='rtl' style='text-align:right; font-family:Arial, sans-serif; font-size:12pt;'>"
+                "<p>שלום,</p>"
+                "<p>מצורף דוח סקירת משתמשים עדכני מתוך המערכת.</p>"
+                "<p>נא לעבור על הממצאים ולעדכן סטטוס/הערות בהתאם.</p>"
+                "<p>בברכה,<br>מערכת בקרות ITGC</p>"
+                "</div>"
+            )
+            mail_item.Attachments.Add(str(export_path))
+            mail_item.Display(False)
+        except Exception as error:
+            self._show_warning("שגיאת מייל", f"יצירת טיוטת מייל נכשלה:\n{error}")
+            return
+
+        self._show_info(
+            "טיוטת מייל נוצרה",
+            f"נוצרה טיוטה ל-{role_label} עם קובץ מצורף:\n{export_path}",
+        )
 
     def _export_control_mapping_report(self):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

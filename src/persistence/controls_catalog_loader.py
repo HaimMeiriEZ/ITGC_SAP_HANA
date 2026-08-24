@@ -54,6 +54,24 @@ def load_catalog(knowledge_base_dir: Path | None = None) -> list[dict[str, Any]]
         return []
 
 
+def save_catalog(
+    controls: list[dict[str, Any]],
+    knowledge_base_dir: Path | None = None,
+) -> None:
+    """Save the controls list back to controls_catalog.json."""
+    path = _catalog_path(knowledge_base_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "_schema_version": 1,
+        "_description": (
+            "רשימת בקרות לניתוח — ניתן לערוך ישירות ב-GUI, לייבא מ-Excel, או לייצא ל-Excel. נשמר ב-Git."
+        ),
+        "controls": controls,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info("Saved controls catalog (%d entries) to %s", len(controls), path)
+
+
 def apply_catalog_to_definitions(
     controls: list[dict[str, Any]],
     definitions: dict[str, dict[str, str | list[str]]],

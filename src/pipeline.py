@@ -48,11 +48,18 @@ def get_controls_catalog_summary() -> list[dict[str, Any]]:
         rows.append(
             {
                 "control_id": control_id,
+                "control_id_ayalon": str(entry.get("control_id_ayalon", "") or "").strip(),
                 "title_he": entry.get("title_he") or definition.get("title_he") or definition.get("title", ""),
+                "description": entry.get("description") or definition.get("description", "") or "",
+                "risk_description": entry.get("risk_description")
+                or definition.get("risk_description", "")
+                or "",
                 "domain": entry.get("domain") or definition.get("domain", ""),
                 "required_slots": ", ".join(required_slots),
                 "status": display_status,
                 "in_scope": entry.get("in_scope", True),
+                "notify_technical": bool(entry.get("notify_technical", False)),
+                "notify_business": bool(entry.get("notify_business", False)),
             }
         )
     return rows

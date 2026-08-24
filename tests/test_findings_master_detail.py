@@ -57,12 +57,14 @@ def test_aggregate_groups_by_control_and_counts():
             "analysis_type": "CRITICAL_PRIVILEGES",
             "in_scope": True,
             "description": "desc am04",
+            "control_id_ayalon": "DB-AM-01_04_79",
         },
         "DB-PP-01_PLACEHOLDER": {
             "title_he": "מדיניות סיסמה",
             "analysis_type": "PASSWORD_POLICY_BASELINE",
             "in_scope": True,
             "description": "desc pp01",
+            "control_id_ayalon": "DB-PP-01_02_76",
         },
     }
     summary = aggregate_findings_by_control(findings, catalog)
@@ -71,8 +73,21 @@ def test_aggregate_groups_by_control_and_counts():
     assert summary["DB-AM-04_PLACEHOLDER"]["valid_records"] == 1
     assert summary["DB-AM-04_PLACEHOLDER"]["finding_records"] == 1
     assert summary["DB-AM-04_PLACEHOLDER"]["risk_level"] == "High"
+    assert summary["DB-AM-04_PLACEHOLDER"]["control_id_display"] == "DB-AM-01_04_79"
+    from core.findings_master_detail import build_summary_row_values
+
+    values = build_summary_row_values(summary["DB-AM-04_PLACEHOLDER"])
+    assert values[0] == "DB-AM-01_04_79"
     details = details_by_control(findings)
     assert len(details["DB-AM-04_PLACEHOLDER"]) == 2
+
+
+def test_display_control_id_prefers_ayalon():
+    from core.findings_master_detail import display_control_id
+
+    assert display_control_id("DB-X_PLACEHOLDER", {"control_id_ayalon": "DB-X_1"}) == "DB-X_1"
+    assert display_control_id("DB-X_PLACEHOLDER", {}) == "DB-X_PLACEHOLDER"
+    assert display_control_id("DB-X_PLACEHOLDER", {"control_id_ayalon": "  "}) == "DB-X_PLACEHOLDER"
 
 
 def test_out_of_scope_control_hidden():
@@ -82,13 +97,15 @@ def test_out_of_scope_control_hidden():
     assert "DB-HIDDEN" not in summary
 
 
-def test_sorted_summary_rows_by_finding_count():
+def test_sorted_summary_rows_by_finding_count_then_risk():
     summary = {
-        "A": {"control_id": "A", "finding_records": 1},
-        "B": {"control_id": "B", "finding_records": 5},
+        "A": {"control_id": "A", "risk_level": "Low", "finding_records": 10},
+        "B": {"control_id": "B", "risk_level": "High", "finding_records": 2},
+        "C": {"control_id": "C", "risk_level": "High", "finding_records": 5},
+        "D": {"control_id": "D", "risk_level": "Medium", "finding_records": 8},
     }
     rows = sorted_summary_rows(summary)
-    assert rows[0]["control_id"] == "B"
+    assert [row["control_id"] for row in rows] == ["A", "D", "C", "B"]
 
 
 def test_completion_finding_has_uar_control_id():

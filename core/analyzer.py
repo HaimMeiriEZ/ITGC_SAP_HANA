@@ -3,6 +3,10 @@ import pandas as pd
 from typing import List, Dict, Any, Optional
 from DataClasses import Finding
 from datetime import datetime
+from core.supplemental_control_map import (
+    control_meta_for_critical_user,
+    control_meta_for_ini_key,
+)
 
 
 RISK_PRIORITY = {"High": 0, "Medium": 1, "Low": 2}
@@ -323,6 +327,7 @@ class AuditAnalyzer:
         ]
 
         if violations.empty:
+            control_id, analysis_type = control_meta_for_critical_user(None)
             self.findings.append(Finding(
                 period_id=period_id,
                 category="Access",
@@ -331,13 +336,16 @@ class AuditAnalyzer:
                 risk_level="Low",
                 status="Compliant",
                 source_slot="USERS",
+                control_id=control_id,
+                analysis_type=analysis_type,
             ))
             return
 
         for _, row in violations.iterrows():
             user_name = row[user_col]
             status = "Exception Approved" if self._is_whitelisted("User", user_name) else "Non-Compliant"
-            
+            control_id, analysis_type = control_meta_for_critical_user(str(user_name))
+
             self.findings.append(Finding(
                 period_id=period_id,
                 category="Access",
@@ -346,6 +354,8 @@ class AuditAnalyzer:
                 risk_level="High",
                 status=status,
                 source_slot="USERS",
+                control_id=control_id,
+                analysis_type=analysis_type,
             ))
 
     def analyze_privileges(self, df_privs: pd.DataFrame, period_id: str):
@@ -745,6 +755,7 @@ class AuditAnalyzer:
             ]
 
             if not matched_entries:
+                control_meta = control_meta_for_ini_key(key_name)
                 self.findings.append(Finding(
                     period_id=period_id,
                     category="Configuration Hardening",
@@ -756,6 +767,8 @@ class AuditAnalyzer:
                     actual_value="Missing",
                     expected_value=str(expected_value),
                     comparison_rule=str(comparison_rule),
+                    control_id=control_meta[0] if control_meta else None,
+                    analysis_type=control_meta[1] if control_meta else None,
                 ))
                 continue
 
@@ -765,6 +778,7 @@ class AuditAnalyzer:
                 f"בדיקת הפרמטר {key_name} מתוך {matched_entries[0].get('file_name') or '-'}"
                 f" / {matched_entries[0].get('section') or '-'}: ערך בפועל {actual_value}, ערך נדרש {expected_value}."
             )
+            control_meta = control_meta_for_ini_key(key_name)
 
             self.findings.append(Finding(
                 period_id=period_id,
@@ -777,6 +791,8 @@ class AuditAnalyzer:
                 actual_value=str(actual_value),
                 expected_value=str(expected_value),
                 comparison_rule=str(comparison_rule),
+                control_id=control_meta[0] if control_meta else None,
+                analysis_type=control_meta[1] if control_meta else None,
             ))
 
     def run_all_checks(self, data_frames: Dict[str, pd.DataFrame], period_id: str) -> List[Finding]:

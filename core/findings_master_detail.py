@@ -48,7 +48,17 @@ def _as_bool(value: Any, default: bool = True) -> bool:
         return default
     if isinstance(value, bool):
         return value
-    return str(value).strip().lower() not in {"false", "0", "no", ""}
+    text = str(value).strip().lower()
+    if text in {"", "none"}:
+        return default
+    return text not in {"false", "0", "no", "off"}
+
+
+def display_control_id(control_id: str, catalog_entry: Optional[Dict[str, Any]] = None) -> str:
+    """Prefer control_id_ayalon for UI; fall back to internal control_id."""
+    entry = catalog_entry or {}
+    ayalon = str(entry.get("control_id_ayalon", "") or "").strip()
+    return ayalon or str(control_id or "").strip() or "-"
 
 
 def _catalog_allows_control(control_id: str, catalog_by_id: Dict[str, Dict[str, Any]]) -> bool:
@@ -119,6 +129,8 @@ def aggregate_findings_by_control(
 
         summaries[control_id] = {
             "control_id": control_id,
+            "control_id_ayalon": str(entry.get("control_id_ayalon", "") or "").strip(),
+            "control_id_display": display_control_id(control_id, entry),
             "title_he": title_he,
             "check_type": check_type,
             "risk_level": worst_risk(getattr(item, "risk_level", "Low") for item in group),
@@ -133,15 +145,20 @@ def aggregate_findings_by_control(
 
 
 def sorted_summary_rows(summary_records: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Sort by finding_records (high→low), then risk (High→Low), then control_id."""
     return sorted(
         summary_records.values(),
-        key=lambda item: (-int(item.get("finding_records", 0) or 0), str(item.get("control_id", ""))),
+        key=lambda item: (
+            -int(item.get("finding_records", 0) or 0),
+            _RISK_RANK.get(str(item.get("risk_level", "") or "").strip(), 98),
+            str(item.get("control_id", "")),
+        ),
     )
 
 
 def build_summary_row_values(row_data: Dict[str, Any]) -> List[str]:
     return [
-        str(row_data.get("control_id", "-")),
+        str(row_data.get("control_id_display") or row_data.get("control_id_ayalon") or row_data.get("control_id", "-")),
         str(row_data.get("title_he", "-")),
         str(row_data.get("check_type", "-")),
         str(row_data.get("risk_level", "-")),

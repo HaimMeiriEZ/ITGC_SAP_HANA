@@ -1,6 +1,7 @@
 """Per-control working-paper Excel reports for SAP HANA DB ITGC."""
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -9,6 +10,13 @@ from openpyxl import Workbook
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+
+try:
+    from src.reporting.excel_ole_embedder import embed_file_in_worksheet
+except ImportError:  # pragma: no cover
+    embed_file_in_worksheet = None  # type: ignore[assignment]
+
+_logger = logging.getLogger(__name__)
 
 _HEADER_FILL = PatternFill(start_color="FF305496", end_color="FF305496", fill_type="solid")
 _HEADER_FONT = Font(bold=True, color="FFFFFFFF", size=11)
@@ -21,6 +29,7 @@ _WRAP_RIGHT = Alignment(horizontal="right", vertical="top", wrap_text=True)
 _CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
 SYSTEM_NAME = "SAP HANA DB"
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif", ".webp"}
 
 
 def _sanitize_sheet_name(name: str) -> str:
@@ -59,8 +68,9 @@ def write_control_working_paper(
     output_path: Path,
     notes: Optional[List[str]] = None,
     raw_population_note: Optional[str] = None,
+    compensating_control_entry: Optional[Dict[str, Any]] = None,
 ) -> Path:
-    """Build a 4-sheet working paper and save to *output_path*."""
+    """Build a working-paper Excel file (4+ sheets) and save to *output_path*."""
     catalog_entry = catalog_entry or {}
     summary_record = summary_record or {}
     detail_rows = list(detail_rows or [])
@@ -96,7 +106,79 @@ def write_control_working_paper(
     findings_sheet = workbook.create_sheet("ריכוז ממצאים")
     _write_findings_sheet(findings_sheet, detail_rows)
 
+    # #region agent log
+    try:
+        import json as _json_dbg
+        from time import time as _time_dbg
+        _dbg_path = Path(__file__).resolve().parents[2] / "debug-ef4f55.log"
+        with open(_dbg_path, "a", encoding="utf-8") as _dbg_f:
+            _dbg_f.write(_json_dbg.dumps({
+                "sessionId": "ef4f55",
+                "runId": "post-fix",
+                "hypothesisId": "C,D,E",
+                "location": "working_paper_report.py:write_control_working_paper",
+                "message": "sheet creation decision",
+                "data": {
+                    "control_id": control_id,
+                    "will_create_sheet": bool(compensating_control_entry),
+                    "entry_keys": list(compensating_control_entry.keys()) if compensating_control_entry else [],
+                    "original_filename": (compensating_control_entry or {}).get("original_filename"),
+                    "stored_path": (compensating_control_entry or {}).get("stored_path"),
+                    "stored_exists": Path(str((compensating_control_entry or {}).get("stored_path", ""))).exists() if compensating_control_entry else False,
+                    "suffix": Path(str((compensating_control_entry or {}).get("original_filename", ""))).suffix.lower() if compensating_control_entry else "",
+                },
+                "timestamp": int(_time_dbg() * 1000),
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # #endregion
+
+    embed_pending = False
+    if compensating_control_entry:
+        comp_sheet = workbook.create_sheet("בקרה מפצה")
+        embed_pending = _write_compensating_control_sheet(comp_sheet, compensating_control_entry)
+
     workbook.save(output_path)
+
+    if compensating_control_entry and embed_pending and embed_file_in_worksheet is not None:
+        stored_path = Path(str(compensating_control_entry.get("stored_path", "")))
+        embedded_path = None
+        if stored_path.exists():
+            embedded_path = embed_file_in_worksheet(
+                output_path,
+                "בקרה מפצה",
+                stored_path,
+            )
+            if embedded_path is None:
+                _append_compensating_embed_failure_note(output_path, compensating_control_entry)
+            else:
+                output_path = Path(embedded_path)
+        # #region agent log
+        try:
+            import json as _json_dbg
+            from time import time as _time_dbg
+            _dbg_path = Path(__file__).resolve().parents[2] / "debug-ef4f55.log"
+            with open(_dbg_path, "a", encoding="utf-8") as _dbg_f:
+                _dbg_f.write(_json_dbg.dumps({
+                    "sessionId": "ef4f55",
+                    "runId": "post-fix",
+                    "hypothesisId": "D",
+                    "location": "working_paper_report.py:ole_embed",
+                    "message": "OLE embed result",
+                    "data": {
+                        "control_id": control_id,
+                        "embed_pending": embed_pending,
+                        "stored_exists": stored_path.exists(),
+                        "embedded": embedded_path is not None,
+                        "final_path": str(embedded_path) if embedded_path else None,
+                        "suffix": Path(embedded_path).suffix if embedded_path else None,
+                    },
+                    "timestamp": int(_time_dbg() * 1000),
+                }, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
+
     return output_path
 
 
@@ -259,6 +341,79 @@ def _write_findings_sheet(sheet, detail_rows: Sequence[Dict[str, Any]]) -> None:
             cell = sheet.cell(row=row_index, column=col, value="" if value is None else str(value))
             fill = _FINDING_FILL if str(detail.get("status", "")) != "Compliant" else None
             _apply_value_cell(cell, fill=fill)
+
+
+def _write_compensating_control_sheet(sheet, entry: Dict[str, Any]) -> bool:
+    """Write a 'בקרה מפצה' sheet. Returns True when OLE embed is needed after save."""
+    _set_rtl(sheet)
+    sheet.column_dimensions["A"].width = 28
+    sheet.column_dimensions["B"].width = 90
+
+    meta_rows = [
+        ("מזהה בקרה", entry.get("control_id", "-")),
+        ("שם קובץ מקורי", entry.get("original_filename", "-")),
+        ("תאריך הוספה", entry.get("added_at", "-")),
+        ("נתיב שמור", entry.get("stored_path", "-")),
+    ]
+    for row_index, (key, value) in enumerate(meta_rows, start=1):
+        key_cell = sheet.cell(row=row_index, column=1, value=str(key))
+        _apply_value_cell(key_cell, fill=_KEY_FILL, font=_KEY_FONT)
+        value_cell = sheet.cell(row=row_index, column=2, value=str(value if value is not None else "-"))
+        _apply_value_cell(value_cell)
+        sheet.row_dimensions[row_index].height = 18
+
+    stored_path = Path(str(entry.get("stored_path", "")))
+    if not stored_path.exists():
+        note = sheet.cell(row=6, column=1, value="קובץ התיעוד לא נמצא בנתיב השמור.")
+        note.alignment = _WRAP_RIGHT
+        return False
+
+    suffix = stored_path.suffix.lower()
+    if suffix in _IMAGE_SUFFIXES:
+        try:
+            img = XLImage(str(stored_path))
+            img.anchor = "A6"
+            sheet.add_image(img)
+        except Exception:
+            note = sheet.cell(row=6, column=1, value=f"[לא ניתן להטמיע תמונה: {stored_path.name}]")
+            note.alignment = _WRAP_RIGHT
+        return False
+
+    embed_label = sheet.cell(row=6, column=1, value="קובץ מוטמע")
+    _apply_value_cell(embed_label, fill=_KEY_FILL, font=_KEY_FONT)
+    pending_cell = sheet.cell(
+        row=6,
+        column=2,
+        value="הקובץ יוטמע בתוך נייר העבודה לאחר השמירה.",
+    )
+    _apply_value_cell(pending_cell)
+    sheet.row_dimensions[7].height = 280
+    return True
+
+
+def _append_compensating_embed_failure_note(output_path: Path, entry: Dict[str, Any]) -> None:
+    """Best-effort note when OLE embedding could not be completed."""
+    try:
+        from openpyxl import load_workbook
+
+        workbook = load_workbook(output_path)
+        if "בקרה מפצה" not in workbook.sheetnames:
+            return
+        sheet = workbook["בקרה מפצה"]
+        filename = str(entry.get("original_filename", "") or "")
+        note_cell = sheet.cell(
+            row=8,
+            column=1,
+            value=(
+                f"לא ניתן היה להטמיע את הקובץ {filename} בתוך Excel. "
+                f"הקובץ המקורי נשמר בנתיב: {entry.get('stored_path', '-')}"
+            ),
+        )
+        note_cell.alignment = _WRAP_RIGHT
+        sheet.merge_cells(start_row=8, start_column=1, end_row=8, end_column=2)
+        workbook.save(output_path)
+    except Exception as exc:
+        _logger.warning("Failed to append compensating embed failure note: %s", exc)
 
 
 def safe_working_paper_filename(control_id: str, timestamp: str) -> str:
