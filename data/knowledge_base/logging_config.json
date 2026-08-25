@@ -1,0 +1,8 @@
+{
+  "process_name": "ITGC_SAP_DB",
+  "environment": "prod",
+  "log_folder_path": "data/logs",
+  "log_retention_days": 90,
+  "min_log_level": "INFO",
+  "email_recipients_on_failure": []
+}

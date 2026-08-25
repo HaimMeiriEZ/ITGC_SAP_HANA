@@ -97,6 +97,18 @@ def embed_file_in_worksheet(
         return final_path
     except Exception as exc:
         _logger.exception("Failed to embed OLE object in %s: %s", workbook_path, exc)
+        try:
+            from core.process_logger import get_process_logger
+
+            plog = get_process_logger()
+            if plog is not None:
+                plog.fail(
+                    "OLE embed",
+                    f"workbook={Path(workbook_path).name}; file={Path(file_path).name}",
+                    exc=exc,
+                )
+        except Exception:
+            pass
         return None
     finally:
         if workbook is not None:

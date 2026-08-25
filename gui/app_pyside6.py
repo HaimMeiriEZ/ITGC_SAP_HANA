@@ -60,7 +60,13 @@ try:
     from DataClasses import Finding
     from DatabaseManager import DatabaseManager
     from core.importer import DataImporter
-    from core.support_logger import SupportLogger
+    from core.process_logger import (
+        close_active_run,
+        get_process_logger,
+        install_excepthook,
+        register_atexit_close,
+        setup_process_logging,
+    )
     from core.user_review import (
         REVIEW_COMPLETION_COMPARISON_RULE,
         build_review_completion_finding,
@@ -494,8 +500,6 @@ class AuditGUI:
             }
             """
         )
-        self.support_logger = SupportLogger(log_dir=PROJECT_ROOT / "logs")
-
         self.loaded_dataframes = {}
         self.loaded_files = {}
         self.loaded_extract_dates = {}
@@ -2132,6 +2136,9 @@ class AuditGUI:
             return
 
         filename = os.path.basename(file_path)
+        plog = get_process_logger()
+        if plog is not None:
+            plog.info("Slot intake start", f"slot={slot_key}; file={filename}")
         self._log("החל ניסיון טעינת קובץ", slot=slot_key, filename=filename, file_path=file_path)
 
         try:
@@ -2159,6 +2166,8 @@ class AuditGUI:
                     raise ValueError(self._format_validation_message(target_slot, filename, missing_columns, alternative_groups, compatible_slots))
 
             self._persist_loaded_slot(target_slot, df, filename, extract_date, file_path)
+            if plog is not None:
+                plog.info("Slot intake end", f"slot={target_slot}; rows={len(df)}")
             self._log("טעינת הקובץ הושלמה בהצלחה", slot=target_slot, filename=filename, rows=len(df))
         except Exception as e:
             self.loaded_dataframes.pop(slot_key, None)
@@ -2166,6 +2175,8 @@ class AuditGUI:
             self.loaded_extract_dates.pop(slot_key, None)
             self.slot_status_labels[slot_key].setText(f"❌ שגיאה בטעינת: {filename}")
             self.slot_delete_btns[slot_key].setEnabled(False)
+            if plog is not None:
+                plog.fail("Slot intake", f"slot={slot_key}; file={filename}", exc=e)
             self._log_error("שגיאה בטעינת קובץ מקור", e, requested_slot=slot_key, filename=filename, file_path=file_path)
             self._show_error(
                 "שגיאת טעינה",
@@ -2373,6 +2384,7 @@ class AuditGUI:
                 preserve_empty_notes=False,
             )
         except Exception as error:
+            self._log_error("שגיאה בייבוא סקירת משתמשים", error, file_path=file_path)
             self._show_error("שגיאת ייבוא", f"לא ניתן לקרוא את קובץ הסקירה.\n\n{error}")
             return
 
@@ -2422,6 +2434,7 @@ class AuditGUI:
                 mode=mode_label,
             )
         except Exception as error:
+            self._log_error("שגיאה ביישום ייבוא סקירת משתמשים", error)
             self._show_error("שגיאת ייבוא", f"הייבוא נכשל.\n\n{error}")
 
     def _validate_user_review_sources(self):
@@ -2562,6 +2575,7 @@ class AuditGUI:
             self._sync_user_review_completion_finding()
             self._show_info("הושלם", f"דוח הסקירה נבנה בהצלחה עבור {len(self.user_review_df)} משתמשים.")
         except Exception as error:
+            self._log_error("שגיאה בבניית דוח סקירה", error)
             self._show_error("שגיאה בבניית דוח סקירה", str(error))
 
     def _get_user_review_period_from_config(self):
@@ -2613,6 +2627,7 @@ class AuditGUI:
             export_user_review_to_excel(self.user_review_report, save_path)
             self._show_info("הצלחה", f"דוח הסקירה יוצא בהצלחה ל-Excel.\n\n{save_path}")
         except Exception as error:
+            self._log_error("שגיאה בייצוא דוח סקירה ל-Excel", error)
             self._show_error("שגיאת ייצוא", f"לא ניתן לייצא את דוח הסקירה ל-Excel.\n\n{error}")
 
     def _export_user_review_pdf(self):
@@ -2628,6 +2643,7 @@ class AuditGUI:
             export_user_review_to_pdf(self.user_review_report, save_path)
             self._show_info("הצלחה", f"דוח הסקירה יוצא בהצלחה ל-PDF.\n\n{save_path}")
         except Exception as error:
+            self._log_error("שגיאה בייצוא דוח סקירה ל-PDF", error)
             self._show_error("שגיאת ייצוא", f"לא ניתן לייצא את דוח הסקירה ל-PDF.\n\n{error}")
 
     def _get_source_file_name(self, finding):
@@ -2883,6 +2899,7 @@ class AuditGUI:
             pd.DataFrame(export_rows).to_excel(save_path, index=False)
             self._show_info("הצלחה", f"טבלת הממצאים יוצאה בהצלחה ל-Excel.\n\n{save_path}")
         except Exception as error:
+            self._log_error("שגיאה בייצוא ממצאים ל-Excel", error)
             self._show_error("שגיאת ייצוא", f"לא ניתן לייצא את הממצאים ל-Excel.\n\n{error}")
 
     def _format_finding_detail_value(self, value):
@@ -3139,6 +3156,10 @@ class AuditGUI:
         if not save_path:
             return
 
+        plog = get_process_logger()
+        if plog is not None:
+            plog.info("Working paper export start", f"control={control_id}")
+
         detail_findings = self.findings_details_by_control.get(control_id, [])
         detail_rows = [self._finding_to_detail_dict(finding) for finding in detail_findings]
         raw_rows = list(self.control_to_slot_rows.get(control_id, []))
@@ -3188,8 +3209,15 @@ class AuditGUI:
                 compensating_control_entry=_cc_entry,
             )
             self._show_info("הצלחה", f"נייר העבודה נשמר:\n{final_path}")
+            plog = get_process_logger()
+            if plog is not None:
+                plog.info("Working paper export end", f"control={control_id}")
             self._log("יוצא נייר עבודה", control_id=control_id, path=str(final_path))
         except Exception as error:
+            plog = get_process_logger()
+            if plog is not None:
+                plog.fail("Working paper export", f"control={control_id}", exc=error)
+            self._log_error("שגיאה בייצוא נייר עבודה", error, control_id=control_id)
             self._show_error("שגיאת ייצוא", f"לא ניתן ליצור נייר עבודה.\n\n{error}")
 
     def _run_audit(self):
@@ -3204,8 +3232,11 @@ class AuditGUI:
             return
 
         loaded_slots = ", ".join(sorted(self.loaded_dataframes.keys()))
+        plog = get_process_logger()
         try:
             self.run_btn.setEnabled(False)
+            if plog is not None:
+                plog.info("Analysis start", f"period={self.period_var.get()}; slots={loaded_slots}")
             self._log("החל ניתוח ITGC", period=self.period_var.get(), loaded_slots=loaded_slots)
             config = self._current_config()
             findings, validator_warnings = run_audit_analysis(
@@ -3239,9 +3270,13 @@ class AuditGUI:
             self._update_filter_options()
             self._refresh_findings_table()
             self._refresh_compensating_controls_table()
+            if plog is not None:
+                plog.info("Analysis end", f"findings={len(findings)}")
             self._log("ניתוח ITGC הושלם", period=self.period_var.get(), findings_count=len(findings))
             self._show_info("הושלם", f"נמצאו {len(findings)} חריגות.")
         except Exception as e:
+            if plog is not None:
+                plog.fail("Analysis", f"period={self.period_var.get()}", exc=e)
             self._log_error("שגיאה בהרצת ניתוח ITGC", e, period=self.period_var.get(), loaded_slots=loaded_slots)
             self._show_error(
                 "שגיאה בהרצת ניתוח",
@@ -3489,6 +3524,7 @@ class AuditGUI:
             self._refresh_controls_catalog_table()
             self._show_info("הצלחה", "ההגדרות עודכנו.")
         except Exception as e:
+            self._log_error("שגיאה בשמירת הגדרות", e, settings_path=str(self.settings_path))
             self._show_error("שגיאת הגדרות", str(e))
 
     def _get_owner_email(self, owner_kind: str) -> str:
@@ -3598,8 +3634,8 @@ class AuditGUI:
             self._show_error("שגיאת ייצוא", f"לא ניתן לייצא את דוח מיפוי הבקרות.\n\nפירוט: {error}")
 
     def _open_logs_folder(self):
-        log_dir = PROJECT_ROOT / "logs"
-        log_dir.mkdir(exist_ok=True)
+        log_dir = PROJECT_ROOT / "data" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
         try:
             if sys.platform.startswith("win"):
                 os.startfile(str(log_dir))
@@ -3611,23 +3647,49 @@ class AuditGUI:
             self._log_error("לא ניתן לפתוח את תיקיית הלוגים", error, log_dir=str(log_dir))
             self._show_error("שגיאת לוגים", f"לא ניתן לפתוח את תיקיית הלוגים.\n\n{error}\n\nהנתיב הוא:\n{log_dir}")
 
+    @staticmethod
+    def _format_log_result(**context) -> str:
+        parts = []
+        for key, value in sorted(context.items()):
+            if value is None:
+                continue
+            parts.append(f"{key}={value}")
+        summary = "; ".join(parts)
+        if len(summary) <= 240:
+            return summary
+        return summary[:237] + "..."
+
     def _log(self, msg, **context):
         print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
-        support_logger = getattr(self, "support_logger", None)
-        if support_logger is not None:
-            support_logger.process(msg, **context)
+        plog = get_process_logger()
+        if plog is not None:
+            step = str(msg) if len(str(msg)) <= 120 else str(msg)[:117] + "..."
+            plog.info(step, self._format_log_result(**context))
 
     def _log_error(self, msg, error=None, **context):
         print(f"[{datetime.now().strftime('%H:%M:%S')}] ERROR: {msg} | {error}")
-        support_logger = getattr(self, "support_logger", None)
-        if support_logger is not None:
-            support_logger.error(msg, exception=error, **context)
+        plog = get_process_logger()
+        if plog is not None:
+            result_parts = [self._format_log_result(**context)]
+            if error is not None:
+                result_parts.append(f"{type(error).__name__}: {error}")
+            result = " | ".join(p for p in result_parts if p)
+            if len(result) > 240:
+                result = result[:237] + "..."
+            step = str(msg) if len(str(msg)) <= 120 else str(msg)[:117] + "..."
+            plog.fail(step, result, exc=error if isinstance(error, BaseException) else None)
 
 
 def launch():
+    setup_process_logging(PROJECT_ROOT, triggered_by="Desktop UI")
+    install_excepthook()
+    register_atexit_close()
     gui = AuditGUI()
     gui.show()
-    return gui.app.exec()
+    try:
+        return gui.app.exec()
+    finally:
+        close_active_run(None)
 
 
 if __name__ == "__main__":

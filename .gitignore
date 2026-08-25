@@ -13,6 +13,8 @@ htmlcov/
 # Runtime logs and local generated files
 logs/*.log
 *.log
+data/logs/
+data/job_history/
 *.db
 *.sqlite
 *.sqlite3

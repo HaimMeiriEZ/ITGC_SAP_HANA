@@ -22,7 +22,13 @@ try:
     from DatabaseManager import DatabaseManager
     from core.importer import DataImporter
     from core.analyzer import AuditAnalyzer
-    from core.support_logger import SupportLogger
+    from core.process_logger import (
+        close_active_run,
+        get_process_logger,
+        install_excepthook,
+        register_atexit_close,
+        setup_process_logging,
+    )
     from core.user_review import build_user_review_report, export_user_review_to_excel, export_user_review_to_pdf
 except ImportError as e:
     print(f"שגיאת ייבוא: וודא שכל הקבצים נמצאים בנתיב הנכון. פירוט: {e}")
@@ -209,7 +215,6 @@ class AuditGUI:
         self.root.geometry("1150x900")
         self.root.minsize(1050, 800)
         self.root.configure(bg="#f8f9fa")
-        self.support_logger = SupportLogger(log_dir=PROJECT_ROOT / "logs")
 
         # נכסי נתונים
         self.loaded_dataframes = {}
@@ -2178,7 +2183,7 @@ class AuditGUI:
             messagebox.showerror("שגיאת הגדרות", str(e))
 
     def _open_logs_folder(self):
-        log_dir = self.support_logger.log_dir if hasattr(self, "support_logger") else PROJECT_ROOT / "logs"
+        log_dir = PROJECT_ROOT / "data" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         self._log("נפתחה תיקיית הלוגים", log_dir=str(log_dir))
         try:
@@ -2187,21 +2192,47 @@ class AuditGUI:
             self._log_error("לא ניתן לפתוח את תיקיית הלוגים", error, log_dir=str(log_dir))
             messagebox.showerror("שגיאת לוגים", f"לא ניתן לפתוח את תיקיית הלוגים.\n\n{error}\n\nהנתיב הוא:\n{log_dir}")
 
+    @staticmethod
+    def _format_log_result(**context) -> str:
+        parts = []
+        for key, value in sorted(context.items()):
+            if value is None:
+                continue
+            parts.append(f"{key}={value}")
+        summary = "; ".join(parts)
+        if len(summary) <= 240:
+            return summary
+        return summary[:237] + "..."
+
     def _log(self, msg, **context):
         print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
-        support_logger = getattr(self, "support_logger", None)
-        if support_logger is not None:
-            support_logger.process(msg, **context)
+        plog = get_process_logger()
+        if plog is not None:
+            step = str(msg) if len(str(msg)) <= 120 else str(msg)[:117] + "..."
+            plog.info(step, self._format_log_result(**context))
 
     def _log_error(self, msg, error=None, **context):
         print(f"[{datetime.now().strftime('%H:%M:%S')}] ERROR: {msg} | {error}")
-        support_logger = getattr(self, "support_logger", None)
-        if support_logger is not None:
-            support_logger.error(msg, exception=error, **context)
+        plog = get_process_logger()
+        if plog is not None:
+            result_parts = [self._format_log_result(**context)]
+            if error is not None:
+                result_parts.append(f"{type(error).__name__}: {error}")
+            result = " | ".join(p for p in result_parts if p)
+            if len(result) > 240:
+                result = result[:237] + "..."
+            step = str(msg) if len(str(msg)) <= 120 else str(msg)[:117] + "..."
+            plog.fail(step, result, exc=error if isinstance(error, BaseException) else None)
 
 if __name__ == "__main__":
+    setup_process_logging(PROJECT_ROOT, triggered_by="Desktop UI")
+    install_excepthook()
+    register_atexit_close()
     root = tk.Tk()
     app = AuditGUI(root)
-    root.mainloop()
+    try:
+        root.mainloop()
+    finally:
+        close_active_run(None)
 
 
