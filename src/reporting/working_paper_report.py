@@ -16,6 +16,14 @@ try:
 except ImportError:  # pragma: no cover
     embed_file_in_worksheet = None  # type: ignore[assignment]
 
+try:
+    from core.findings_master_detail import display_control_id
+except ImportError:  # pragma: no cover
+    def display_control_id(control_id: str, catalog_entry: Optional[Dict[str, Any]] = None) -> str:
+        entry = catalog_entry or {}
+        ayalon = str(entry.get("control_id_ayalon", "") or "").strip()
+        return ayalon or str(control_id or "").strip() or "-"
+
 _logger = logging.getLogger(__name__)
 
 _HEADER_FILL = PatternFill(start_color="FF305496", end_color="FF305496", fill_type="solid")
@@ -26,6 +34,7 @@ _FINDING_FILL = PatternFill(start_color="FFFFE6E6", end_color="FFFFE6E6", fill_t
 _THIN = Side(border_style="thin", color="FF808080")
 _BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
 _WRAP_RIGHT = Alignment(horizontal="right", vertical="top", wrap_text=True)
+_WRAP_RIGHT_RTL = Alignment(horizontal="right", vertical="top", wrap_text=True, readingOrder=2)
 _CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
 SYSTEM_NAME = "SAP HANA DB"
@@ -83,7 +92,8 @@ def write_control_working_paper(
 
     workbook = Workbook()
     overview = workbook.active
-    overview.title = _sanitize_sheet_name(control_id)
+    display_id = display_control_id(control_id, catalog_entry)
+    overview.title = _sanitize_sheet_name(display_id)
     _write_overview_sheet(
         overview,
         control_id=control_id,
@@ -106,33 +116,6 @@ def write_control_working_paper(
     findings_sheet = workbook.create_sheet("ריכוז ממצאים")
     _write_findings_sheet(findings_sheet, detail_rows)
 
-    # #region agent log
-    try:
-        import json as _json_dbg
-        from time import time as _time_dbg
-        _dbg_path = Path(__file__).resolve().parents[2] / "debug-ef4f55.log"
-        with open(_dbg_path, "a", encoding="utf-8") as _dbg_f:
-            _dbg_f.write(_json_dbg.dumps({
-                "sessionId": "ef4f55",
-                "runId": "post-fix",
-                "hypothesisId": "C,D,E",
-                "location": "working_paper_report.py:write_control_working_paper",
-                "message": "sheet creation decision",
-                "data": {
-                    "control_id": control_id,
-                    "will_create_sheet": bool(compensating_control_entry),
-                    "entry_keys": list(compensating_control_entry.keys()) if compensating_control_entry else [],
-                    "original_filename": (compensating_control_entry or {}).get("original_filename"),
-                    "stored_path": (compensating_control_entry or {}).get("stored_path"),
-                    "stored_exists": Path(str((compensating_control_entry or {}).get("stored_path", ""))).exists() if compensating_control_entry else False,
-                    "suffix": Path(str((compensating_control_entry or {}).get("original_filename", ""))).suffix.lower() if compensating_control_entry else "",
-                },
-                "timestamp": int(_time_dbg() * 1000),
-            }, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-    # #endregion
-
     embed_pending = False
     if compensating_control_entry:
         comp_sheet = workbook.create_sheet("בקרה מפצה")
@@ -153,31 +136,6 @@ def write_control_working_paper(
                 _append_compensating_embed_failure_note(output_path, compensating_control_entry)
             else:
                 output_path = Path(embedded_path)
-        # #region agent log
-        try:
-            import json as _json_dbg
-            from time import time as _time_dbg
-            _dbg_path = Path(__file__).resolve().parents[2] / "debug-ef4f55.log"
-            with open(_dbg_path, "a", encoding="utf-8") as _dbg_f:
-                _dbg_f.write(_json_dbg.dumps({
-                    "sessionId": "ef4f55",
-                    "runId": "post-fix",
-                    "hypothesisId": "D",
-                    "location": "working_paper_report.py:ole_embed",
-                    "message": "OLE embed result",
-                    "data": {
-                        "control_id": control_id,
-                        "embed_pending": embed_pending,
-                        "stored_exists": stored_path.exists(),
-                        "embedded": embedded_path is not None,
-                        "final_path": str(embedded_path) if embedded_path else None,
-                        "suffix": Path(embedded_path).suffix if embedded_path else None,
-                    },
-                    "timestamp": int(_time_dbg() * 1000),
-                }, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-        # #endregion
 
     return output_path
 
@@ -191,8 +149,9 @@ def _write_overview_sheet(
     notes: List[str],
 ) -> None:
     _set_rtl(sheet)
+    display_id = display_control_id(control_id, catalog_entry)
     rows = [
-        ("מזהה בקרה", control_id),
+        ("מזהה בקרה", display_id),
         ("כותרת בקרה", catalog_entry.get("title_he") or summary_record.get("title_he") or "-"),
         ("שם מערכת", SYSTEM_NAME),
         ("תהליך", catalog_entry.get("process") or "-"),
@@ -216,7 +175,13 @@ def _write_overview_sheet(
         _apply_value_cell(key_cell, fill=_KEY_FILL, font=_KEY_FONT)
         value_cell = sheet.cell(row=index, column=2, value=str(value if value is not None else "-"))
         _apply_value_cell(value_cell)
-        sheet.row_dimensions[index].height = 18 if index not in {7, 15} else 80
+        if key == "צעדי טסט":
+            # Force RTL reading order so Hebrew multiline text aligns to the right.
+            value_cell.alignment = _WRAP_RIGHT_RTL
+            line_count = max(1, str(value).count("\n") + 1)
+            sheet.row_dimensions[index].height = max(80, min(line_count * 16, 420))
+        else:
+            sheet.row_dimensions[index].height = 18 if index not in {7} else 80
 
 
 def _write_ipe_sheet(sheet, ipe_entries: Sequence[Dict[str, Any]]) -> None:

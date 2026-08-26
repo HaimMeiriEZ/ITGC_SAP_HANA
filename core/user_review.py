@@ -101,6 +101,53 @@ REVIEW_DECISION_DROPDOWNS = {
 UNREVIEWED_STATUS = "טרם נסקר"
 USER_TYPE_OPTIONS = ["Dialog", "Generic", "Technical", "Application"]
 REVIEW_COMPLETION_COMPARISON_RULE = "השלמת סקירת משתמשים"
+UNREVIEWED_USER_COMPARISON_RULE = "משתמש שטרם נסקר"
+USER_REVIEW_CONTROL_ID = "DB-AM-01_PLACEHOLDER"
+REVIEW_DECISION_FIELDS = ("review_status", "manager_decision", "manager_comments", "action_required")
+
+
+def merge_existing_review_decisions(
+    existing_reviews: Optional[Dict[str, Dict[str, Any]]],
+    review_df: Optional[pd.DataFrame],
+    period_id: str,
+) -> Dict[str, Dict[str, Any]]:
+    """Merge DB-saved review rows with in-memory decisions (memory wins on conflict)."""
+    merged: Dict[str, Dict[str, Any]] = {
+        str(key).strip(): dict(value)
+        for key, value in (existing_reviews or {}).items()
+        if str(key).strip()
+    }
+    if review_df is None or review_df.empty or "user_name" not in review_df.columns:
+        return merged
+
+    period = _normalize_text(period_id)
+    scoped = review_df
+    if "period_id" in scoped.columns:
+        period_scoped = scoped[
+            scoped["period_id"].map(lambda value: _normalize_text(value) or period) == period
+        ]
+        if not period_scoped.empty:
+            scoped = period_scoped
+        elif compute_review_progress(review_df).get("reviewed", 0) > 0:
+            # Same-session dataframe may carry a stale period_id label; keep reviewed rows.
+            scoped = review_df
+        else:
+            scoped = period_scoped
+
+    for _, row in scoped.iterrows():
+        username = _normalize_text(row.get("user_name"))
+        if not username:
+            continue
+        entry = dict(merged.get(username, {}))
+        for field in REVIEW_DECISION_FIELDS:
+            if field not in row.index:
+                continue
+            raw = row.get(field)
+            if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+                continue
+            entry[field] = _normalize_text(raw)
+        merged[username] = entry
+    return merged
 
 
 def compute_review_progress(review_df: Optional[pd.DataFrame]) -> Dict[str, int]:
@@ -145,9 +192,50 @@ def build_review_completion_finding(period_id: str, review_df: Optional[pd.DataF
         actual_value=f"{progress['percent']}%",
         expected_value="100%",
         comparison_rule=REVIEW_COMPLETION_COMPARISON_RULE,
-        control_id="DB-UAR-02_PLACEHOLDER",
-        analysis_type="PERIODIC_UAR",
+        control_id=USER_REVIEW_CONTROL_ID,
+        analysis_type="USER_POPULATION_REVIEW",
+        evidence_ref=(
+            f"review_progress|reviewed={progress['reviewed']}|"
+            f"unreviewed={progress['unreviewed']}|total={progress['total']}"
+        ),
     )
+
+
+def build_unreviewed_user_findings(period_id: str, review_df: Optional[pd.DataFrame]) -> list:
+    """One finding per user still marked as not reviewed (for detail / working paper)."""
+    from DataClasses import Finding
+
+    if review_df is None or review_df.empty or "review_status" not in review_df.columns:
+        return []
+    if "user_name" not in review_df.columns:
+        return []
+
+    statuses = review_df["review_status"].map(lambda value: _normalize_text(value) or UNREVIEWED_STATUS)
+    unreviewed = review_df.loc[statuses == UNREVIEWED_STATUS]
+    findings = []
+    for _, row in unreviewed.iterrows():
+        username = _normalize_text(row.get("user_name")) or "-"
+        user_type = _normalize_text(row.get("user_type")) or "-"
+        findings.append(
+            Finding(
+                period_id=period_id,
+                category="User Review",
+                title=f"משתמש שטרם נסקר: {username}",
+                description=(
+                    f"המשתמש {username} (סוג: {user_type}) מופיע בדוח הסקירה "
+                    f"בסטטוס '{UNREVIEWED_STATUS}'."
+                ),
+                risk_level="High",
+                status="Non-Compliant",
+                source_slot="USERS",
+                actual_value=username,
+                expected_value="השלמת סקירה (סטטוס שונה מ'טרם נסקר')",
+                comparison_rule=UNREVIEWED_USER_COMPARISON_RULE,
+                control_id=USER_REVIEW_CONTROL_ID,
+                analysis_type="USER_POPULATION_REVIEW",
+            )
+        )
+    return findings
 
 
 def _find_existing_column(df: pd.DataFrame, candidates: Iterable[str]) -> Optional[str]:

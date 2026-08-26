@@ -89,6 +89,26 @@ class IpeEvidenceRepository:
         for entry in list(data.get(slot_key, [])):
             self.remove_image(slot_key, str(entry.get("id", "")), data)
 
+    def clear_all(self, data: Dict[str, List[Dict[str, Any]]] | None = None) -> Dict[str, List[Dict[str, Any]]]:
+        """Remove all IPE evidence files and reset metadata (used on app start)."""
+        working = data if data is not None else self.load()
+        for slot_key in list(working.keys()):
+            self.clear_slot(slot_key, working)
+        working.clear()
+
+        if self._evidence_dir.exists():
+            for child in self._evidence_dir.iterdir():
+                try:
+                    if child.is_dir():
+                        shutil.rmtree(child, ignore_errors=True)
+                    elif child.is_file():
+                        child.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+        self.save(working)
+        return working
+
 
 def build_slot_to_controls_mapping(catalog_by_id: Dict[str, Dict[str, Any]] | None = None) -> Dict[str, List[str]]:
     """Invert catalog required_slots into slot_key → [control_id, ...]."""

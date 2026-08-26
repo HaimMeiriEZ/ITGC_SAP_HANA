@@ -37,6 +37,31 @@ def test_ipe_repository_add_remove_and_reload(tmp_path: Path):
     assert not Path(entry["stored_path"]).exists()
 
 
+def test_ipe_repository_clear_all_removes_files_and_metadata(tmp_path: Path):
+    output_dir = tmp_path / "output"
+    base_dir = tmp_path
+    repo = IpeEvidenceRepository(output_dir=output_dir, base_dir=base_dir)
+    data: dict = {}
+
+    source = tmp_path / "shot.png"
+    PilImage.new("RGB", (20, 10), color=(0, 255, 0)).save(source)
+
+    entry = repo.add_image("USERS", source, ["DB-AM-01_PLACEHOLDER"], data)
+    stored = Path(entry["stored_path"])
+    assert stored.exists()
+    assert repo.load().get("USERS")
+
+    cleared = repo.clear_all(data)
+    assert cleared == {}
+    assert data == {}
+    assert not stored.exists()
+    assert repo.load() == {}
+    evidence_root = base_dir / "data" / "evidence"
+    if evidence_root.exists():
+        remaining = [p for p in evidence_root.rglob("*") if p.is_file()]
+        assert remaining == []
+
+
 def test_slot_to_controls_mapping_inverts_catalog():
     catalog = {
         "DB-A": {"required_slots": ["USERS", "GRANTED_PRIVILEGES"]},
@@ -111,11 +136,12 @@ def test_write_control_working_paper_creates_four_sheets(tmp_path: Path):
     write_control_working_paper(
         control_id="DB-AM-04_PLACEHOLDER",
         catalog_entry={
+            "control_id_ayalon": "DB-AM-01_04_79",
             "title_he": "הרשאות קריטיות",
             "process": "גישה",
             "description": "תיאור",
             "risk_description": "סיכון",
-            "test_steps_override": "צעד 1",
+            "test_steps_override": "1. צעד ראשון\n2. צעד שני",
         },
         summary_record={
             "title_he": "הרשאות קריטיות",
@@ -160,3 +186,13 @@ def test_write_control_working_paper_creates_four_sheets(tmp_path: Path):
     assert "IPE" in workbook.sheetnames
     assert "אוכלוסיה נבחנת" in workbook.sheetnames
     assert "ריכוז ממצאים" in workbook.sheetnames
+
+    overview = workbook[workbook.sheetnames[0]]
+    assert overview.title == "DB-AM-01_04_79"
+    assert overview["A1"].value == "מזהה בקרה"
+    assert overview["B1"].value == "DB-AM-01_04_79"
+    assert overview["A15"].value == "צעדי טסט"
+    steps_alignment = overview["B15"].alignment
+    assert steps_alignment.horizontal == "right"
+    assert steps_alignment.wrap_text is True
+    assert getattr(steps_alignment, "readingOrder", None) == 2

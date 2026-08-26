@@ -185,6 +185,8 @@ class DatabaseManager:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             for row in rows:
+                period_id = str(row.get("period_id") or "").strip()
+                user_name = str(row.get("user_name") or "").strip()
                 cursor.execute(
                     '''
                         INSERT INTO user_access_reviews (
@@ -211,7 +213,7 @@ class DatabaseManager:
                             updated_at=excluded.updated_at
                     ''',
                     (
-                        row.get('period_id'), row.get('user_name'), row.get('review_date'), row.get('extract_date'),
+                        period_id, user_name, row.get('review_date'), row.get('extract_date'),
                         row.get('user_type'), row.get('active_status'), row.get('last_login'), str(row.get('days_since_login', '')),
                         row.get('critical_privileges'), row.get('has_exception'), row.get('exception_reason'),
                         row.get('review_status'), row.get('manager_decision'), row.get('action_required'),
@@ -222,8 +224,9 @@ class DatabaseManager:
 
     def get_user_review_rows(self, period_id: str) -> Dict[str, Dict[str, Any]]:
         """טעינת החלטות סקירה שמורות לפי תקופה"""
+        normalized_period = str(period_id or "").strip()
         with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM user_access_reviews WHERE period_id = ?", (period_id,))
-            return {row['user_name']: dict(row) for row in cursor.fetchall()}
+            cursor.execute("SELECT * FROM user_access_reviews WHERE period_id = ?", (normalized_period,))
+            return {str(row['user_name']).strip(): dict(row) for row in cursor.fetchall()}

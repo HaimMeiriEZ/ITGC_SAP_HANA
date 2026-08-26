@@ -69,9 +69,12 @@ try:
     )
     from core.user_review import (
         REVIEW_COMPLETION_COMPARISON_RULE,
+        UNREVIEWED_USER_COMPARISON_RULE,
         build_review_completion_finding,
+        build_unreviewed_user_findings,
         build_user_review_report,
         compute_review_progress,
+        merge_existing_review_decisions,
         export_user_review_to_excel,
         export_user_review_to_pdf,
         import_user_review_from_excel,
@@ -79,6 +82,7 @@ try:
     from core.findings_master_detail import (
         aggregate_findings_by_control,
         build_summary_row_values,
+        detail_findings_for_control,
         details_by_control,
         display_control_id,
         ensure_finding_control_id,
@@ -508,7 +512,8 @@ class AuditGUI:
             output_dir=PROJECT_ROOT / "data" / "output",
             base_dir=PROJECT_ROOT,
         )
-        self.ipe_evidence_data = self.ipe_evidence_repo.load()
+        # Do not restore prior-session IPE screenshots — require fresh upload each run.
+        self.ipe_evidence_data = self.ipe_evidence_repo.clear_all()
         self.slot_ipe_buttons = {}
         self.slot_ipe_thumb_layouts = {}
         self.slot_group_boxes = {}
@@ -1145,8 +1150,10 @@ class AuditGUI:
             "finding_records",
             "total_records",
             "working_paper",
+            "send_email",
             "source_file",
             "extraction_date",
+            "risk_description",
             "description",
         ]
         summary_headers = [
@@ -1158,13 +1165,22 @@ class AuditGUI:
             "רשומות עם ממצא",
             'סה"כ רשומות',
             "צור נייר עבודה",
+            "שלח מייל",
             "קובץ מקור",
             "תאריך הפקה",
-            "תיאור בדיקה",
+            "תיאור הסיכון",
+            "תיאור בקרה",
         ]
         self.findings_summary_table = QTableWidget(0, len(summary_headers))
         self.findings_summary_table.setHorizontalHeaderLabels(summary_headers)
         self._configure_table(self.findings_summary_table)
+        summary_hdr = self.findings_summary_table.horizontalHeader()
+        summary_hdr.setSectionResizeMode(QHeaderView.Interactive)
+        summary_hdr.setStretchLastSection(False)
+        self.findings_summary_table.setColumnWidth(7, 120)  # צור נייר עבודה
+        self.findings_summary_table.setColumnWidth(8, 90)   # שלח מייל
+        self.findings_summary_table.setColumnWidth(11, 220)  # תיאור הסיכון
+        self.findings_summary_table.setColumnWidth(12, 220)  # תיאור בקרה
         self.findings_summary_table.setSortingEnabled(True)
         self.findings_summary_finding_count_col = 5
         self.findings_summary_table.itemSelectionChanged.connect(self._refresh_selected_finding_detail)
@@ -2553,14 +2569,15 @@ class AuditGUI:
         try:
             review_date = self.review_date_widget.date().toPython()
             review_period_start, review_period_end = self._get_user_review_period_from_config()
-            existing_reviews = self.db.get_user_review_rows(self.period_var.get())
+            period = self._audit_period_id()
+            existing_reviews = self.db.get_user_review_rows(period)
             config = self._current_config()
             self.user_review_report = build_user_review_report(
                 users_df=self.loaded_dataframes["USERS"],
                 privileges_df=self.loaded_dataframes.get("GRANTED_PRIVILEGES"),
                 config=config,
                 extract_dates=self.loaded_extract_dates,
-                period_id=self.period_var.get(),
+                period_id=period,
                 review_date=review_date,
                 review_period_start=review_period_start,
                 review_period_end=review_period_end,
@@ -2741,9 +2758,9 @@ class AuditGUI:
             table_row = self.findings_summary_table.rowCount()
             self.findings_summary_table.insertRow(table_row)
             control_id_value = str(row_data.get("control_id", ""))
-            # Text columns 0-6, button at 7, then remaining text at 8+
+            # Text cols 0-6, buttons at 7-8, remaining text at 9+
             for source_index, value in enumerate(values):
-                target_col = source_index if source_index < 7 else source_index + 1
+                target_col = source_index if source_index < 7 else source_index + 2
                 item = SortableTableWidgetItem("" if value is None else str(value))
                 item.setTextAlignment(Qt.AlignCenter if target_col != 0 else Qt.AlignRight | Qt.AlignVCenter)
                 item.setData(SortableTableWidgetItem.DF_INDEX_ROLE, control_id_value)
@@ -2766,6 +2783,15 @@ class AuditGUI:
                 lambda _checked=False, cid=control_id_value: self._export_control_working_paper(cid)
             )
             self.findings_summary_table.setCellWidget(table_row, 7, wp_button)
+
+            has_findings = int(row_data.get("finding_records", 0) or 0) > 0
+            email_button = QPushButton("שלח מייל")
+            email_button.setToolTip("פתיחת טיוטת Outlook לגורמים הרלוונטיים לבקרה")
+            email_button.setEnabled(has_findings)
+            email_button.clicked.connect(
+                lambda _checked=False, cid=control_id_value: self._send_control_finding_email(cid)
+            )
+            self.findings_summary_table.setCellWidget(table_row, 8, email_button)
 
         self.findings_summary_table.setSortingEnabled(was_sorting)
         if was_sorting:
@@ -2816,6 +2842,8 @@ class AuditGUI:
         control_id = self._get_selected_finding_control_id()
         self.selected_finding_control_id = control_id
         detail_findings = list(self.findings_details_by_control.get(control_id, [])) if control_id else []
+        # User-review control: detail shows only unreviewed users (not UAR/exception rows).
+        detail_findings = detail_findings_for_control(control_id or "", detail_findings)
         detail_findings.sort(
             key=lambda finding: self._get_sort_key(finding, self.sort_column),
             reverse=self.sort_reverse,
@@ -3141,26 +3169,38 @@ class AuditGUI:
         except Exception as err:
             self._show_error("שגיאת הסרה", str(err))
 
-    def _export_control_working_paper(self, control_id: str):
+    def _export_control_working_paper(self, control_id: str, silent_output_path: Path | None = None):
         if not control_id:
-            return
+            return None
         catalog = load_controls_catalog()
         summary_record = self.findings_summary_records.get(control_id)
         if summary_record is None:
-            self._show_warning("אין נתונים", "לא נמצאה שורת ריכוז עבור הבקרה שנבחרה.")
-            return
+            if silent_output_path is None:
+                self._show_warning("אין נתונים", "לא נמצאה שורת ריכוז עבור הבקרה שנבחרה.")
+            return None
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        default_name = safe_working_paper_filename(control_id, timestamp)
-        save_path = self._get_save_file("שמירת נייר עבודה", "Excel Workbook (*.xlsx)", default_name)
-        if not save_path:
-            return
+        catalog_entry = catalog.get(control_id, {})
+        if silent_output_path is not None:
+            save_path = Path(silent_output_path)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            default_name = safe_working_paper_filename(
+                display_control_id(control_id, catalog_entry),
+                timestamp,
+            )
+            save_path = self._get_save_file("שמירת נייר עבודה", "Excel Workbook (*.xlsx)", default_name)
+            if not save_path:
+                return None
 
         plog = get_process_logger()
         if plog is not None:
             plog.info("Working paper export start", f"control={control_id}")
 
-        detail_findings = self.findings_details_by_control.get(control_id, [])
+        detail_findings = detail_findings_for_control(
+            control_id,
+            self.findings_details_by_control.get(control_id, []),
+        )
         detail_rows = [self._finding_to_detail_dict(finding) for finding in detail_findings]
         raw_rows = list(self.control_to_slot_rows.get(control_id, []))
         if not raw_rows:
@@ -3171,35 +3211,10 @@ class AuditGUI:
             note = "לא נטענה אוכלוסייה גולמית לסלוט הראשי של הבקרה."
 
         try:
-            # #region agent log
             _cc_entry = self.compensating_controls_data.get(control_id)
-            try:
-                import json as _json_dbg
-                from time import time as _time_dbg
-                _dbg_path = Path(__file__).resolve().parents[1] / "debug-ef4f55.log"
-                with open(_dbg_path, "a", encoding="utf-8") as _dbg_f:
-                    _dbg_f.write(_json_dbg.dumps({
-                        "sessionId": "ef4f55",
-                        "runId": "post-fix",
-                        "hypothesisId": "A,B",
-                        "location": "app_pyside6.py:_export_control_working_paper",
-                        "message": "export compensating lookup",
-                        "data": {
-                            "control_id": control_id,
-                            "comp_keys": list(self.compensating_controls_data.keys()),
-                            "entry_found": _cc_entry is not None,
-                            "entry_filename": (_cc_entry or {}).get("original_filename"),
-                            "entry_stored_path": (_cc_entry or {}).get("stored_path"),
-                            "save_path": str(save_path),
-                        },
-                        "timestamp": int(_time_dbg() * 1000),
-                    }, ensure_ascii=False) + "\n")
-            except Exception:
-                pass
-            # #endregion
             final_path = write_control_working_paper(
                 control_id=control_id,
-                catalog_entry=catalog.get(control_id, {}),
+                catalog_entry=catalog_entry,
                 summary_record=summary_record,
                 detail_rows=detail_rows,
                 raw_population_rows=raw_rows,
@@ -3208,17 +3223,97 @@ class AuditGUI:
                 raw_population_note=note,
                 compensating_control_entry=_cc_entry,
             )
-            self._show_info("הצלחה", f"נייר העבודה נשמר:\n{final_path}")
-            plog = get_process_logger()
+            if silent_output_path is None:
+                self._show_info("הצלחה", f"נייר העבודה נשמר:\n{final_path}")
             if plog is not None:
                 plog.info("Working paper export end", f"control={control_id}")
             self._log("יוצא נייר עבודה", control_id=control_id, path=str(final_path))
+            return Path(final_path)
         except Exception as error:
-            plog = get_process_logger()
             if plog is not None:
                 plog.fail("Working paper export", f"control={control_id}", exc=error)
             self._log_error("שגיאה בייצוא נייר עבודה", error, control_id=control_id)
-            self._show_error("שגיאת ייצוא", f"לא ניתן ליצור נייר עבודה.\n\n{error}")
+            if silent_output_path is None:
+                self._show_error("שגיאת ייצוא", f"לא ניתן ליצור נייר עבודה.\n\n{error}")
+            return None
+
+    def _recipients_for_control(self, control_id: str) -> list[str]:
+        catalog = load_controls_catalog()
+        entry = catalog.get(control_id, {})
+        recipients: list[str] = []
+        if bool(entry.get("notify_technical", False)):
+            email = self._get_owner_email("technical")
+            if self._validate_email_address(email) and email not in recipients:
+                recipients.append(email)
+        if bool(entry.get("notify_business", False)):
+            email = self._get_owner_email("business")
+            if self._validate_email_address(email) and email not in recipients:
+                recipients.append(email)
+        return recipients
+
+    def _send_control_finding_email(self, control_id: str) -> None:
+        """Open an Outlook draft for one control to its configured technical/business owners."""
+        if not control_id:
+            return
+        summary = self.findings_summary_records.get(control_id) or {}
+        if int(summary.get("finding_records", 0) or 0) <= 0:
+            self._show_warning("אין ממצאים", "לבקרה זו אין ממצאים לשליחה במייל.")
+            return
+
+        recipients = self._recipients_for_control(control_id)
+        display_id = str(summary.get("control_id_display") or control_id)
+        if not recipients:
+            self._show_warning(
+                "לא הוגדרו כתובות מייל",
+                f"לבקרה {display_id} לא הוגדרו נמענים.\n"
+                "סמן גורם טכנולוגי / עסקי בקטלוג הבקרות והגדר כתובות בהגדרות מערכת.",
+            )
+            return
+
+        if not sys.platform.startswith("win"):
+            self._show_warning("מערכת לא נתמכת", "יצירת טיוטת מייל נתמכת כרגע ב-Windows בלבד.")
+            return
+
+        wp_dir = PROJECT_ROOT / "data" / "output" / "working_papers"
+        wp_dir.mkdir(parents=True, exist_ok=True)
+        safe_id = re.sub(r"[\\/*?:\[\]&]", "_", display_id)
+        auto_path = wp_dir / f"{safe_id}_working_paper.xlsx"
+        wp_path = self._export_control_working_paper(control_id, silent_output_path=auto_path)
+        if wp_path is None or not wp_path.exists():
+            self._show_error("שגיאת ייצוא", "לא ניתן ליצור נייר עבודה לצירוף למייל.")
+            return
+
+        title = str(summary.get("title_he") or display_id)
+        subject = f"ממצאי ביקורת SAP HANA DB ITGC — {display_id} — {title}"
+        try:
+            import win32com.client  # type: ignore
+
+            outlook = win32com.client.Dispatch("Outlook.Application")
+            mail = outlook.CreateItem(0)
+            mail.To = "; ".join(recipients)
+            mail.Subject = subject
+            mail.HTMLBody = (
+                "<div dir='rtl' style='text-align:right; font-family:Arial, sans-serif; font-size:12pt;'>"
+                "<p>שלום,</p>"
+                "<p>מצורף נייר עבודה לבקרה שנמצאו בה ממצאים:</p>"
+                f"<p>&#8226; {display_id} — {title}</p>"
+                "<p>בברכה</p>"
+                "</div>"
+            )
+            mail.Attachments.Add(str(wp_path.resolve()))
+            mail.Display()
+            self._log(
+                "נוצרה טיוטת מייל לממצאי בקרה",
+                control_id=control_id,
+                recipients="; ".join(recipients),
+            )
+            self._show_info(
+                "טיוטת מייל נוצרה",
+                f"נוצרה טיוטה עבור {display_id}\nנמענים: {', '.join(recipients)}",
+            )
+        except Exception as error:
+            self._log_error("שגיאה ביצירת טיוטת מייל לממצא", error, control_id=control_id)
+            self._show_error("שגיאת מייל", f"לא ניתן ליצור טיוטה.\n\n{error}")
 
     def _run_audit(self):
         if not self.loaded_dataframes:
@@ -3254,7 +3349,7 @@ class AuditGUI:
                     finding
                     for finding in (self.current_findings or [])
                     if (
-                        str(getattr(finding, "control_id", "") or "") == "DB-UAR-02_PLACEHOLDER"
+                        str(getattr(finding, "control_id", "") or "") == "DB-AM-01_PLACEHOLDER"
                         or str(getattr(finding, "category", "") or "") == "User Review"
                         or str(getattr(finding, "comparison_rule", "") or "")
                         == REVIEW_COMPLETION_COMPARISON_RULE
@@ -3289,59 +3384,75 @@ class AuditGUI:
             self.run_btn.setEnabled(True)
 
     def _build_findings_from_user_review(self):
+        memory_snapshot = None
+        prior_progress = {"reviewed": 0}
+        if not getattr(self, "user_review_df", pd.DataFrame()).empty:
+            memory_snapshot = self.user_review_df.copy()
+            prior_progress = compute_review_progress(memory_snapshot)
+
         review_df = self._ensure_user_review_report_for_audit()
         if review_df is None or review_df.empty:
             return []
 
+        post_progress = compute_review_progress(review_df)
+        if (
+            memory_snapshot is not None
+            and prior_progress.get("reviewed", 0) > 0
+            and post_progress.get("reviewed", 0) < prior_progress.get("reviewed", 0)
+        ):
+            review_df = memory_snapshot
+            self.user_review_df = memory_snapshot.copy()
+            if self.user_review_report is not None:
+                self.user_review_report["dataframe"] = memory_snapshot.copy()
+
         findings = []
-        completion_finding = build_review_completion_finding(self.period_var.get(), review_df)
+        period = self._audit_period_id()
+        completion_finding = build_review_completion_finding(period, review_df)
         if completion_finding is not None:
             findings.append(completion_finding)
-
-        exception_rows = review_df[review_df["has_exception"] == "כן"]
-        for _, row in exception_rows.iterrows():
-            username = row.get("user_name", "-")
-            reason = row.get("exception_reason", "-")
-            findings.append(
-                Finding(
-                    period_id=self.period_var.get(),
-                    category="User Review",
-                    title=f"חריג בסקירת משתמשים: {username}",
-                    description=f"זוהה חריג במסגרת סקירת משתמשים. סיבה: {reason}",
-                    risk_level="High" if "קריטי" in str(reason) or "Generic" in str(reason) else "Medium",
-                    status="Non-Compliant",
-                    source_slot="USERS",
-                    actual_value=str(reason),
-                    expected_value="לא נדרש חריג / קיימת הצדקה מתועדת",
-                    comparison_rule="סקירת משתמשים",
-                    control_id="DB-UAR-02_PLACEHOLDER",
-                    analysis_type="PERIODIC_UAR",
-                )
-            )
+        # Detail / working paper for this control show only unreviewed users.
+        findings.extend(build_unreviewed_user_findings(period, review_df))
         return findings
+
+    def _audit_period_id(self) -> str:
+        return str(self.period_var.get() or "").strip()
 
     def _sync_user_review_completion_finding(self):
         if not hasattr(self, "current_findings") or self.current_findings is None:
             return
 
+        replace_rules = {REVIEW_COMPLETION_COMPARISON_RULE, UNREVIEWED_USER_COMPARISON_RULE}
         self.current_findings = [
             finding
             for finding in self.current_findings
-            if getattr(finding, "comparison_rule", None) != REVIEW_COMPLETION_COMPARISON_RULE
+            if getattr(finding, "comparison_rule", None) not in replace_rules
         ]
-        completion_finding = build_review_completion_finding(
-            self.period_var.get(),
-            getattr(self, "user_review_df", None),
-        )
+        review_df = getattr(self, "user_review_df", None)
+        period = self._audit_period_id()
+        completion_finding = build_review_completion_finding(period, review_df)
         if completion_finding is not None:
             self.current_findings.append(completion_finding)
+        self.current_findings.extend(build_unreviewed_user_findings(period, review_df))
         if hasattr(self, "tree"):
             self._refresh_findings_table()
 
+    @staticmethod
+    def _is_review_completion_summary_finding(finding) -> bool:
+        return getattr(finding, "comparison_rule", None) == REVIEW_COMPLETION_COMPARISON_RULE
+
     def _ensure_user_review_report_for_audit(self):
-        if self.user_review_report is not None and not self.user_review_df.empty:
-            current_period = str(self.user_review_report.get("metadata", {}).get("period_id", ""))
-            if current_period == self.period_var.get():
+        period = self._audit_period_id()
+        metadata_period = ""
+        if self.user_review_report is not None:
+            metadata_period = str(self.user_review_report.get("metadata", {}).get("period_id", "")).strip()
+        df_periods = set()
+        if not getattr(self, "user_review_df", pd.DataFrame()).empty and "period_id" in self.user_review_df.columns:
+            df_periods = {
+                str(value).strip()
+                for value in self.user_review_df["period_id"].dropna().unique()
+            }
+        if not self.user_review_df.empty:
+            if metadata_period == period or period in df_periods:
                 return self.user_review_df
 
         required_slots = ["USERS", "GRANTED_PRIVILEGES"]
@@ -3351,13 +3462,18 @@ class AuditGUI:
         try:
             review_date = self.review_date_widget.date().toPython()
             review_period_start, review_period_end = self._get_user_review_period_from_config()
-            existing_reviews = self.db.get_user_review_rows(self.period_var.get())
+            existing_reviews = self.db.get_user_review_rows(period)
+            existing_reviews = merge_existing_review_decisions(
+                existing_reviews,
+                getattr(self, "user_review_df", None),
+                period,
+            )
             self.user_review_report = build_user_review_report(
                 users_df=self.loaded_dataframes["USERS"],
                 privileges_df=self.loaded_dataframes.get("GRANTED_PRIVILEGES"),
                 config=self._current_config(),
                 extract_dates=self.loaded_extract_dates,
-                period_id=self.period_var.get(),
+                period_id=period,
                 review_date=review_date,
                 review_period_start=review_period_start,
                 review_period_end=review_period_end,

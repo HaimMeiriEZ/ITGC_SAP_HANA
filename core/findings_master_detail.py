@@ -6,9 +6,12 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 from DataClasses import Finding
 
 SUPPLEMENTAL_CONTROL_ID = "DB-SUPPLEMENTAL"
-UAR_CONTROL_ID = "DB-UAR-02_PLACEHOLDER"
+USER_REVIEW_CONTROL_ID = "DB-AM-01_PLACEHOLDER"
+# Backward-compatible alias (was wrongly DB-UAR-02 / privilege review).
+UAR_CONTROL_ID = USER_REVIEW_CONTROL_ID
 USER_REVIEW_CATEGORY = "User Review"
 REVIEW_COMPLETION_COMPARISON_RULE = "השלמת סקירת משתמשים"
+UNREVIEWED_USER_COMPARISON_RULE = "משתמש שטרם נסקר"
 
 _RISK_RANK = {"High": 0, "Medium": 1, "Low": 2}
 
@@ -28,16 +31,28 @@ def worst_risk(levels: Iterable[str]) -> str:
 def ensure_finding_control_id(finding: Finding) -> str:
     """Assign a stable control_id on the finding when missing; return the id."""
     existing = str(getattr(finding, "control_id", None) or "").strip()
+    category = str(getattr(finding, "category", "") or "")
+    comparison_rule = str(getattr(finding, "comparison_rule", "") or "")
+    is_user_review = (
+        category == USER_REVIEW_CATEGORY
+        or comparison_rule == REVIEW_COMPLETION_COMPARISON_RULE
+    )
+
+    # Remap legacy privilege-review id wrongly used for user-review findings.
+    if existing == "DB-UAR-02_PLACEHOLDER" and is_user_review:
+        finding.control_id = USER_REVIEW_CONTROL_ID
+        if not getattr(finding, "analysis_type", None) or finding.analysis_type == "PERIODIC_UAR":
+            finding.analysis_type = "USER_POPULATION_REVIEW"
+        return USER_REVIEW_CONTROL_ID
+
     if existing:
         return existing
 
-    category = str(getattr(finding, "category", "") or "")
-    comparison_rule = str(getattr(finding, "comparison_rule", "") or "")
-    if category == USER_REVIEW_CATEGORY or comparison_rule == REVIEW_COMPLETION_COMPARISON_RULE:
-        finding.control_id = UAR_CONTROL_ID
+    if is_user_review:
+        finding.control_id = USER_REVIEW_CONTROL_ID
         if not getattr(finding, "analysis_type", None):
-            finding.analysis_type = "PERIODIC_UAR"
-        return UAR_CONTROL_ID
+            finding.analysis_type = "USER_POPULATION_REVIEW"
+        return USER_REVIEW_CONTROL_ID
 
     finding.control_id = SUPPLEMENTAL_CONTROL_ID
     return SUPPLEMENTAL_CONTROL_ID
@@ -85,6 +100,25 @@ def details_by_control(findings: Sequence[Finding]) -> Dict[str, List[Finding]]:
     return grouped
 
 
+def is_unreviewed_user_finding(finding: Finding) -> bool:
+    return str(getattr(finding, "comparison_rule", "") or "") == UNREVIEWED_USER_COMPARISON_RULE
+
+
+def detail_findings_for_control(control_id: str, findings: Sequence[Finding]) -> List[Finding]:
+    """Findings shown in the detail table / working-paper findings sheet.
+
+    For the user-review control, only per-user 'טרם נסקר' rows are shown.
+    """
+    items = list(findings or [])
+    if str(control_id or "").strip() != USER_REVIEW_CONTROL_ID:
+        return [
+            finding
+            for finding in items
+            if str(getattr(finding, "comparison_rule", "") or "") != REVIEW_COMPLETION_COMPARISON_RULE
+        ]
+    return [finding for finding in items if is_unreviewed_user_finding(finding)]
+
+
 def aggregate_findings_by_control(
     findings: Sequence[Finding],
     catalog_by_id: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -117,6 +151,16 @@ def aggregate_findings_by_control(
 
         valid_records = sum(1 for item in group if str(getattr(item, "status", "")) == "Compliant")
         finding_records = len(group) - valid_records
+        total_records = len(group)
+
+        # User-review completion: counts come from report progress, not finding rows.
+        if control_id == USER_REVIEW_CONTROL_ID:
+            progress = _review_progress_from_findings(group)
+            if progress is not None:
+                valid_records = int(progress.get("reviewed", 0) or 0)
+                finding_records = int(progress.get("unreviewed", 0) or 0)
+                total_records = int(progress.get("total", 0) or 0)
+
         source_file = "-"
         extract_date = "-"
         if group:
@@ -136,12 +180,35 @@ def aggregate_findings_by_control(
             "risk_level": worst_risk(getattr(item, "risk_level", "Low") for item in group),
             "valid_records": valid_records,
             "finding_records": finding_records,
-            "total_records": len(group),
+            "total_records": total_records,
             "source_file": source_file,
             "extraction_date": extract_date,
+            "risk_description": _short_description(entry.get("risk_description") or "", max_len=220),
             "description": description,
         }
     return summaries
+
+
+def _review_progress_from_findings(group: Sequence[Finding]) -> Optional[Dict[str, int]]:
+    """Extract review progress embedded on the completion finding (evidence_ref)."""
+    for item in group:
+        if str(getattr(item, "comparison_rule", "") or "") != REVIEW_COMPLETION_COMPARISON_RULE:
+            continue
+        raw = str(getattr(item, "evidence_ref", "") or "").strip()
+        if not raw.startswith("review_progress|"):
+            continue
+        parsed: Dict[str, int] = {}
+        for part in raw.split("|")[1:]:
+            if "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            try:
+                parsed[key.strip()] = int(value.strip())
+            except ValueError:
+                continue
+        if {"reviewed", "unreviewed", "total"} <= set(parsed):
+            return parsed
+    return None
 
 
 def sorted_summary_rows(summary_records: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -167,5 +234,6 @@ def build_summary_row_values(row_data: Dict[str, Any]) -> List[str]:
         str(row_data.get("total_records", 0)),
         str(row_data.get("source_file", "-")),
         str(row_data.get("extraction_date", "-")),
+        str(row_data.get("risk_description", "-")),
         str(row_data.get("description", "-")),
     ]
