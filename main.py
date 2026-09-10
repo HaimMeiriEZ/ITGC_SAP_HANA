@@ -13,12 +13,12 @@ from core.process_logger import (
     register_atexit_close,
     setup_process_logging,
 )
-
-PROJECT_ROOT = Path(__file__).resolve().parent
+from src.config import default_db_path, ensure_runtime_data, get_install_root
 
 
 def main():
-    setup_process_logging(PROJECT_ROOT, triggered_by="CLI")
+    project_root = ensure_runtime_data(get_install_root())
+    setup_process_logging(project_root, triggered_by="CLI")
     install_excepthook()
     register_atexit_close()
     plog = get_process_logger()
@@ -38,8 +38,8 @@ def main():
         )
 
     try:
-        db = DatabaseManager()
-        importer = DataImporter(config_path="config/settings.json")
+        db = DatabaseManager(str(default_db_path(project_root)))
+        importer = DataImporter(config_path=str(project_root / "config" / "settings.json"))
 
         whitelist = db.get_whitelist()
         config = importer.config

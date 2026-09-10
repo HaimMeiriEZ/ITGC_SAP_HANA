@@ -26,6 +26,10 @@ data/output/
 # Editor settings
 .vscode/
 
+# Packaging artifacts
+build/
+dist/
+
 # OS noise
 Desktop.ini
 desktop.ini

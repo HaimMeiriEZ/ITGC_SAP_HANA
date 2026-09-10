@@ -1,7 +1,18 @@
 import sqlite3
 import json
 from datetime import datetime
+from pathlib import Path
 from typing import List, Dict, Any
+
+
+def _default_db_path() -> str:
+    try:
+        from src.config import default_db_path
+
+        return str(default_db_path())
+    except Exception:
+        return "audit_system.db"
+
 
 class DatabaseManager:
     """
@@ -9,8 +20,9 @@ class DatabaseManager:
     אחראי על יצירת טבלאות, שמירת ממצאים וניהול לוגים.
     """
     
-    def __init__(self, db_path: str = "audit_system.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: str | None = None):
+        self.db_path = str(db_path) if db_path else _default_db_path()
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     def _get_connection(self):

@@ -13,7 +13,7 @@ if sys.platform != "win32" and not os.environ.get("DISPLAY"):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QDate, Qt
-from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
 )
 
 BASE_DIR = Path(__file__).resolve().parent
+# Dev fallback until src.config is importable; launch() refreshes via ensure_runtime_data.
 PROJECT_ROOT = BASE_DIR if (BASE_DIR / "core").exists() else BASE_DIR.parent
 
 if str(PROJECT_ROOT) not in sys.path:
@@ -66,6 +67,12 @@ try:
         install_excepthook,
         register_atexit_close,
         setup_process_logging,
+    )
+    from src.config import (
+        default_db_path,
+        ensure_runtime_data,
+        get_install_root,
+        resource_path,
     )
     from core.user_review import (
         REVIEW_COMPLETION_COMPARISON_RULE,
@@ -441,6 +448,9 @@ class AuditGUI:
     }
 
     def __init__(self, root=None):
+        global PROJECT_ROOT
+        PROJECT_ROOT = ensure_runtime_data(get_install_root())
+
         self.app = QApplication.instance() or QApplication(sys.argv)
         self.app.setLayoutDirection(Qt.RightToLeft)
 
@@ -606,10 +616,10 @@ class AuditGUI:
 
         self.settings_path = PROJECT_ROOT / "config" / "settings.json"
         try:
-            self.db = DatabaseManager()
+            self.db = DatabaseManager(str(default_db_path(PROJECT_ROOT)))
             self.importer = DataImporter(config_path=str(self.settings_path))
         except Exception as e:
-            self.db = DatabaseManager()
+            self.db = DatabaseManager(str(default_db_path(PROJECT_ROOT)))
             self.importer = None
             print(f"Error: {e}")
 
@@ -658,7 +668,9 @@ class AuditGUI:
         title_row.setContentsMargins(0, 0, 0, 0)
         title_row.setSpacing(12)
 
-        logo_path = Path(__file__).resolve().parent / "assets" / "ayalon_logo.png"
+        logo_path = resource_path("gui", "assets", "ayalon_logo.png")
+        if not logo_path.exists():
+            logo_path = Path(__file__).resolve().parent / "assets" / "ayalon_logo.png"
         if logo_path.exists():
             logo_pixmap = QPixmap(str(logo_path))
             if not logo_pixmap.isNull():
@@ -667,6 +679,12 @@ class AuditGUI:
                 logo_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                 logo_label.setContentsMargins(0, 0, 0, 0)
                 title_row.addWidget(logo_label)
+
+                icon_path = resource_path("gui", "assets", "ayalon_logo.ico")
+                if not icon_path.exists():
+                    icon_path = Path(__file__).resolve().parent / "assets" / "ayalon_logo.ico"
+                if icon_path.exists():
+                    self.window.setWindowIcon(QIcon(str(icon_path)))
 
         title_row.addStretch(1)
         self.app_title_label = QLabel("כלי להערכת בקרות ITGC בסביבת SAP HANA DB")
@@ -1194,6 +1212,9 @@ class AuditGUI:
         self.findings_detail_table = QTableWidget(0, len(detail_headers))
         self.findings_detail_table.setHorizontalHeaderLabels(detail_headers)
         self._configure_table(self.findings_detail_table)
+        detail_hdr = self.findings_detail_table.horizontalHeader()
+        detail_hdr.setSectionResizeMode(QHeaderView.Interactive)
+        detail_hdr.setStretchLastSection(False)
         self.findings_detail_table.setSortingEnabled(True)
         self.findings_detail_table.cellDoubleClicked.connect(lambda _row, _col: self._open_finding_details())
         self.findings_detail_table.horizontalHeader().sectionClicked.connect(self._on_findings_header_clicked)
@@ -3696,11 +3717,11 @@ class AuditGUI:
         try:
             import win32com.client  # type: ignore[import-not-found]
         except ModuleNotFoundError:
-            install_command = f'"{sys.executable}" -m pip install pywin32'
             self._show_warning(
                 "רכיב חסר ל-Outlook",
-                "לא ניתן ליצור טיוטת Outlook כי חסרה חבילת pywin32.\n\n"
-                f"יש להריץ פעם אחת בסביבת העבודה:\n{install_command}",
+                "לא ניתן ליצור טיוטת Outlook כי חסרה תמיכת Outlook/COM במחשב זה.\n\n"
+                "ודא שמותקן Microsoft Outlook במחשב היעד.\n"
+                "בגרסת הפצה (Setup) יש להתקין מחדש את החבילה המלאה אם הבעיה נמשכת.",
             )
             return
         except Exception as error:
@@ -3797,6 +3818,8 @@ class AuditGUI:
 
 
 def launch():
+    global PROJECT_ROOT
+    PROJECT_ROOT = ensure_runtime_data(get_install_root())
     setup_process_logging(PROJECT_ROOT, triggered_by="Desktop UI")
     install_excepthook()
     register_atexit_close()

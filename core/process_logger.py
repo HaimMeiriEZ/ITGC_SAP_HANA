@@ -86,29 +86,39 @@ def _location_from_exc(exc: BaseException | None = None) -> str:
 
 def get_install_root() -> Path:
     """Writable application root: folder of the EXE when frozen, else project root."""
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parents[1]
+    try:
+        from src.config import get_install_root as _config_install_root
+
+        return _config_install_root()
+    except Exception:
+        if getattr(sys, "frozen", False):
+            return Path(sys.executable).resolve().parent
+        return Path(__file__).resolve().parents[1]
 
 
 def ensure_logging_runtime(install_root: Path | None = None) -> Path:
     """Create logging dirs and seed logging_config.json once (never overwrite)."""
-    root = Path(install_root) if install_root is not None else get_install_root()
-    data_dir = root / "data"
-    for sub in ("logs", "job_history", "config", "knowledge_base"):
-        (data_dir / sub).mkdir(parents=True, exist_ok=True)
+    try:
+        from src.config import ensure_runtime_data
 
-    kb_seed = data_dir / "knowledge_base" / "logging_config.json"
-    dest_logging = data_dir / "config" / "logging_config.json"
-    if not dest_logging.exists():
-        if kb_seed.is_file():
-            shutil.copy2(kb_seed, dest_logging)
-        else:
-            dest_logging.write_text(
-                json.dumps(_DEFAULT_CONFIG, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-    return root
+        return ensure_runtime_data(install_root)
+    except Exception:
+        root = Path(install_root) if install_root is not None else get_install_root()
+        data_dir = root / "data"
+        for sub in ("logs", "job_history", "config", "knowledge_base"):
+            (data_dir / sub).mkdir(parents=True, exist_ok=True)
+
+        kb_seed = data_dir / "knowledge_base" / "logging_config.json"
+        dest_logging = data_dir / "config" / "logging_config.json"
+        if not dest_logging.exists():
+            if kb_seed.is_file():
+                shutil.copy2(kb_seed, dest_logging)
+            else:
+                dest_logging.write_text(
+                    json.dumps(_DEFAULT_CONFIG, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+        return root
 
 
 def load_logging_config(install_root: Path) -> dict[str, Any]:
